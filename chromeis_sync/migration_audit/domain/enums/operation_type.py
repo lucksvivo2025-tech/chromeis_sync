@@ -1,0 +1,19 @@
+from enum import Enum
+
+
+class OperationType(str, Enum):
+    PURCHASE = "PURCHASE"
+
+    RENEWAL = "RENEWAL"
+
+    REGISTRATION = "REGISTRATION"
+
+    TRANSFER = "TRANSFER"
+
+    UPGRADE = "UPGRADE"
+
+    DOWNGRADE = "DOWNGRADE"
+
+    CANCELLATION = "CANCELLATION"
+
+    UNKNOWN = "UNKNOWN"

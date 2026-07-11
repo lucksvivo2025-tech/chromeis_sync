@@ -1,0 +1,469 @@
+========== __init__.py ==========
+========== engine.py ==========
+import frappe
+
+from chromeis_sync.migration_audit.transaction import InvoiceTransaction
+
+
+class MigrationEngine:
+
+    def __init__(self):
+        self.manifest = []
+
+    def generate_manifest(self):
+
+        self.manifest = frappe.db.sql("""
+            SELECT
+                si.name,
+                si.whmcs_invoice_id,
+                si.customer,
+                si.currency AS erp_currency,
+                c.code AS target_currency,
+                si.grand_total,
+                COUNT(sii.name) AS item_count
+            FROM `tabSales Invoice` si
+
+            JOIN `tabSales Invoice Item` sii
+                ON sii.parent = si.name
+
+            JOIN whmcs_mirror.tblinvoices i
+                ON CAST(i.id AS CHAR)=si.whmcs_invoice_id
+
+            JOIN whmcs_mirror.tblclients cl
+                ON cl.id=i.userid
+
+            JOIN whmcs_mirror.tblcurrencies c
+                ON c.id=cl.currency
+
+            WHERE
+                si.docstatus = 1
+                AND si.currency != c.code
+
+            GROUP BY si.name
+
+            ORDER BY CAST(si.whmcs_invoice_id AS UNSIGNED)
+        """, as_dict=True)
+
+        print(f"Manifest contains {len(self.manifest)} invoices")
+
+    def create_snapshot(self, invoice_name):
+
+        si = frappe.get_doc("Sales Invoice", invoice_name)
+
+        return {
+            "header": si.as_dict(),
+            "items": [d.as_dict() for d in si.items],
+            "taxes": [d.as_dict() for d in si.taxes],
+            "payments": [d.as_dict() for d in si.payments],
+            "payment_schedule": [d.as_dict() for d in si.payment_schedule],
+            "sales_team": [d.as_dict() for d in si.sales_team],
+        }
+
+    def test_transaction(self, invoice_name):
+
+        row = next(
+            r for r in self.manifest
+            if r.name == invoice_name
+        )
+
+        snapshot = self.create_snapshot(invoice_name)
+
+        txn = InvoiceTransaction(
+            snapshot,
+            row.target_currency
+        )
+
+        return txn.execute()
+
+    def run(self):
+
+        self.generate_manifest()
+
+        print("\nEngine Ready")
+========== models.py ==========
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ManifestRow:
+    invoice_name: str
+    whmcs_invoice_id: str
+    customer: str
+    erp_currency: str
+    target_currency: str
+    grand_total: float
+    item_count: int
+
+
+@dataclass
+class VerificationResult:
+    passed: bool = True
+    errors: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+
+
+@dataclass
+class RepairResult:
+    old_invoice: str
+    new_invoice: str = ""
+    success: bool = False
+    message: str = ""
+========== rebuild.py ==========
+import frappe
+
+
+class InvoiceRebuilder:
+
+    HEADER_FIELDS = [
+        "customer",
+        "customer_name",
+        "company",
+        "posting_date",
+        "posting_time",
+        "due_date",
+        "currency",
+        "debit_to",
+        "cost_center",
+        "remarks",
+        "custom_whmcs_client_id",
+        "whmcs_invoice_id",
+        "update_outstanding_for_self"
+    ]
+
+    ITEM_FIELDS = [
+        "item_code",
+        "item_name",
+        "description",
+        "qty",
+        "uom",
+        "stock_uom",
+        "conversion_factor",
+        "rate",
+        "income_account",
+        "cost_center"
+    ]
+
+    def __init__(self, snapshot, target_currency):
+        self.snapshot = snapshot
+        self.target_currency = target_currency
+
+    def build(self):
+
+        old = self.snapshot["header"]
+
+        inv = frappe.new_doc("Sales Invoice")
+
+        # -------------------------
+        # Header
+        # -------------------------
+
+        for field in self.HEADER_FIELDS:
+            if field in old:
+                inv.set(field, old[field])
+
+        inv.currency = self.target_currency
+
+        # -------------------------
+        # Items
+        # -------------------------
+
+
+        for row in self.snapshot["items"]:
+
+            item = {}
+
+            for field in self.ITEM_FIELDS:
+                if field in row:
+                    item[field] = row[field]
+
+            inv.append("items", item)
+
+        inv.insert()
+
+        inv.submit()
+
+        return inv
+========== repair.py ==========
+import frappe
+
+
+class InvoiceRepair:
+
+    def __init__(self, invoice_name):
+
+        self.invoice_name = invoice_name
+        self.invoice = frappe.get_doc(
+            "Sales Invoice",
+            invoice_name
+        )
+
+    def cancel(self):
+
+        if self.invoice.docstatus != 1:
+            raise Exception(
+                f"{self.invoice.name} is not submitted."
+            )
+
+        self.invoice.cancel()
+
+        self.invoice.reload()
+
+        if self.invoice.docstatus != 2:
+            raise Exception(
+                "Cancel failed."
+            )
+
+        print("✓ Cancelled")
+
+    def release_whmcs_id(self):
+
+        frappe.db.set_value(
+            "Sales Invoice",
+            self.invoice.name,
+            "whmcs_invoice_id",
+            None,
+            update_modified=False
+        )
+
+        value = frappe.db.get_value(
+            "Sales Invoice",
+            self.invoice.name,
+            "whmcs_invoice_id"
+        )
+
+        if value is not None:
+            raise Exception(
+                "WHMCS Invoice ID still exists."
+            )
+
+        print("✓ WHMCS ID Released")
+========== snapshot.py ==========
+import frappe
+from copy import deepcopy
+
+
+class SnapshotService:
+
+    @staticmethod
+    def create(invoice_name):
+
+        si = frappe.get_doc(
+            "Sales Invoice",
+            invoice_name
+        )
+
+        return {
+            "header": deepcopy(si.as_dict()),
+            "items": [deepcopy(d.as_dict()) for d in si.items],
+            "taxes": [deepcopy(d.as_dict()) for d in si.taxes],
+            "payments": [deepcopy(d.as_dict()) for d in si.payments],
+            "payment_schedule": [
+                deepcopy(d.as_dict())
+                for d in si.payment_schedule
+            ],
+            "sales_team": [
+                deepcopy(d.as_dict())
+                for d in si.sales_team
+            ],
+            "gl_entries": frappe.db.sql("""
+                SELECT *
+                FROM `tabGL Entry`
+                WHERE voucher_no=%s
+                ORDER BY creation
+            """, invoice_name, as_dict=True)
+        }
+========== transaction.py ==========
+import frappe
+
+from chromeis_sync.migration_audit.snapshot import SnapshotService
+from chromeis_sync.migration_audit.repair import InvoiceRepair
+from chromeis_sync.migration_audit.rebuild import InvoiceRebuilder
+from chromeis_sync.migration_audit.verify import InvoiceVerifier
+from chromeis_sync.migration_audit.models import RepairResult
+
+
+class InvoiceTransaction:
+
+    def __init__(self, invoice_name, target_currency):
+        self.invoice_name = invoice_name
+        self.target_currency = target_currency
+
+    def execute(self):
+
+        savepoint = self.invoice_name.replace("-", "_")
+
+        print(f"\n===== {self.invoice_name} =====")
+
+        snapshot = SnapshotService.create(self.invoice_name)
+
+        frappe.db.savepoint(savepoint)
+
+        try:
+
+            repair = InvoiceRepair(self.invoice_name)
+
+            repair.cancel()
+
+            repair.release_whmcs_id()
+
+            rebuilder = InvoiceRebuilder(
+                snapshot,
+                self.target_currency
+            )
+
+            new_invoice = rebuilder.build()
+
+            verifier = InvoiceVerifier()
+
+            verification = verifier.verify(
+                snapshot,
+                new_invoice,
+                self.target_currency
+            )
+
+            if not verification.passed:
+                raise Exception(
+                    "\n".join(verification.errors)
+                )
+
+            frappe.db.commit()
+
+            print("✓ Transaction Committed")
+
+            return RepairResult(
+                old_invoice=self.invoice_name,
+                new_invoice=new_invoice.name,
+                success=True,
+                message="Verified"
+            )
+
+        except Exception as e:
+
+            frappe.db.rollback(save_point=savepoint)
+
+            print("✗ Transaction Rolled Back")
+
+            return RepairResult(
+                old_invoice=self.invoice_name,
+                success=False,
+                message=str(e)
+            )
+========== verify.py ==========
+import frappe
+
+from chromeis_sync.migration_audit.models import VerificationResult
+
+
+class InvoiceVerifier:
+
+    def verify(self, snapshot, new_invoice, target_currency):
+
+        result = VerificationResult()
+
+        old = snapshot["header"]
+
+        # ----------------------------------------------------
+        # Identity Validation
+        # ----------------------------------------------------
+
+        identity_fields = [
+            "customer",
+            "company",
+            "custom_whmcs_client_id",
+            "whmcs_invoice_id",
+        ]
+
+        for field in identity_fields:
+
+            if old.get(field) != getattr(new_invoice, field, None):
+                result.passed = False
+                result.errors.append(
+                    f"{field} mismatch"
+                )
+
+        # ----------------------------------------------------
+        # Currency Validation
+        # ----------------------------------------------------
+
+        if new_invoice.currency != target_currency:
+            result.passed = False
+            result.errors.append(
+                f"Currency mismatch ({new_invoice.currency} != {target_currency})"
+            )
+
+        # ----------------------------------------------------
+        # Grand Total Validation
+        # ----------------------------------------------------
+
+        if round(float(old.get("grand_total", 0)), 2) != round(float(new_invoice.grand_total), 2):
+            result.passed = False
+            result.errors.append(
+                "Grand total mismatch"
+            )
+
+        # ----------------------------------------------------
+        # Item Count Validation
+        # ----------------------------------------------------
+
+        if len(snapshot["items"]) != len(new_invoice.items):
+            result.passed = False
+            result.errors.append(
+                "Item count mismatch"
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # Item Validation
+        # ----------------------------------------------------
+
+        for index, old_item in enumerate(snapshot["items"]):
+
+            new_item = new_invoice.items[index]
+
+            comparisons = [
+
+                (
+                    "item_code",
+                    old_item.get("item_code"),
+                    new_item.item_code
+                ),
+
+                (
+                    "qty",
+                    round(float(old_item.get("qty", 0)), 6),
+                    round(float(new_item.qty), 6)
+                ),
+
+                (
+                    "rate",
+                    round(float(old_item.get("rate", 0)), 6),
+                    round(float(new_item.rate), 6)
+                ),
+
+                (
+                    "income_account",
+                    old_item.get("income_account"),
+                    new_item.income_account
+                ),
+
+                (
+                    "cost_center",
+                    old_item.get("cost_center"),
+                    new_item.cost_center
+                ),
+
+            ]
+
+            for field, old_value, new_value in comparisons:
+
+                if old_value != new_value:
+
+                    result.passed = False
+
+                    result.errors.append(
+                        f"Item {index + 1}: {field} mismatch "
+                        f"({old_value} != {new_value})"
+                    )
+
+        return result

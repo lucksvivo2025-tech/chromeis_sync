@@ -1,0 +1,50 @@
+umerate(snapshot["items"]):
+
+            new_item = new_invoice.items[index]
+
+            comparisons = [
+
+                (
+                    "item_code",
+                    old_item.get("item_code"),
+                    new_item.item_code
+                ),
+
+                (
+                    "qty",
+                    round(float(old_item.get("qty", 0)), 6),
+                    round(float(new_item.qty), 6)
+                ),
+
+                (
+                    "rate",
+                    round(float(old_item.get("rate", 0)), 6),
+                    round(float(new_item.rate), 6)
+                ),
+
+                (
+                    "income_account",
+                    old_item.get("income_account"),
+                    new_item.income_account
+                ),
+
+                (
+                    "cost_center",
+                    old_item.get("cost_center"),
+                    new_item.cost_center
+                ),
+
+            ]
+
+            for field, old_value, new_value in comparisons:
+
+                if old_value != new_value:
+
+                    result.passed = False
+
+                    result.errors.append(
+                        f"Item {index + 1}: {field} mismatch "
+                        f"({old_value} != {new_value})"
+                    )
+
+        return result

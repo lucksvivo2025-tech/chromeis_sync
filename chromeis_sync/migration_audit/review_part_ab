@@ -1,0 +1,146 @@
+(self):
+
+        old = self.snapshot["header"]
+
+        inv = frappe.new_doc("Sales Invoice")
+
+        # -------------------------
+        # Header
+        # -------------------------
+
+        for field in self.HEADER_FIELDS:
+            if field in old:
+                inv.set(field, old[field])
+
+        inv.currency = self.target_currency
+
+        # -------------------------
+        # Items
+        # -------------------------
+
+
+        for row in self.snapshot["items"]:
+
+            item = {}
+
+            for field in self.ITEM_FIELDS:
+                if field in row:
+                    item[field] = row[field]
+
+            inv.append("items", item)
+
+        inv.insert()
+
+        inv.submit()
+
+        return inv
+========== repair.py ==========
+import frappe
+
+
+class InvoiceRepair:
+
+    def __init__(self, invoice_name):
+
+        self.invoice_name = invoice_name
+        self.invoice = frappe.get_doc(
+            "Sales Invoice",
+            invoice_name
+        )
+
+    def cancel(self):
+
+        if self.invoice.docstatus != 1:
+            raise Exception(
+                f"{self.invoice.name} is not submitted."
+            )
+
+        self.invoice.cancel()
+
+        self.invoice.reload()
+
+        if self.invoice.docstatus != 2:
+            raise Exception(
+                "Cancel failed."
+            )
+
+        print("✓ Cancelled")
+
+    def release_whmcs_id(self):
+
+        frappe.db.set_value(
+            "Sales Invoice",
+            self.invoice.name,
+            "whmcs_invoice_id",
+            None,
+            update_modified=False
+        )
+
+        value = frappe.db.get_value(
+            "Sales Invoice",
+            self.invoice.name,
+            "whmcs_invoice_id"
+        )
+
+        if value is not None:
+            raise Exception(
+                "WHMCS Invoice ID still exists."
+            )
+
+        print("✓ WHMCS ID Released")
+========== snapshot.py ==========
+import frappe
+from copy import deepcopy
+
+
+class SnapshotService:
+
+    @staticmethod
+    def create(invoice_name):
+
+        si = frappe.get_doc(
+            "Sales Invoice",
+            invoice_name
+        )
+
+        return {
+            "header": deepcopy(si.as_dict()),
+            "items": [deepcopy(d.as_dict()) for d in si.items],
+            "taxes": [deepcopy(d.as_dict()) for d in si.taxes],
+            "payments": [deepcopy(d.as_dict()) for d in si.payments],
+            "payment_schedule": [
+                deepcopy(d.as_dict())
+                for d in si.payment_schedule
+            ],
+            "sales_team": [
+                deepcopy(d.as_dict())
+                for d in si.sales_team
+            ],
+            "gl_entries": frappe.db.sql("""
+                SELECT *
+                FROM `tabGL Entry`
+                WHERE voucher_no=%s
+                ORDER BY creation
+            """, invoice_name, as_dict=True)
+        }
+========== transaction.py ==========
+import frappe
+
+from chromeis_sync.migration_audit.snapshot import SnapshotService
+from chromeis_sync.migration_audit.repair import InvoiceRepair
+from chromeis_sync.migration_audit.rebuild import InvoiceRebuilder
+from chromeis_sync.migration_audit.verify import InvoiceVerifier
+from chromeis_sync.migration_audit.models import RepairResult
+
+
+class InvoiceTransaction:
+
+    def __init__(self, invoice_name, target_currency):
+        self.invoice_name = invoice_name
+        self.target_currency = target_currency
+
+    def execute(self):
+
+        savepoint = self.invoice_name.replace("-", "_")
+
+        print
