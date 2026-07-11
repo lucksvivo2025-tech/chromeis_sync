@@ -1,0 +1,30 @@
+{
+ "add_total_row": 1,
+ "columns": [
+  {
+   "fieldname": "client",
+   "fieldtype": "Data",
+   "label": "Client",
+   "width": 200
+  },
+  {
+   "fieldname": "total_paid",
+   "fieldtype": "Currency",
+   "label": "Total Paid Income",
+   "width": 150
+  },
+  {
+   "fieldname": "count",
+   "fieldtype": "Int",
+   "label": "Invoice Count",
+   "width": 100
+  }
+ ],
+ "doctype": "Report",
+ "is_standard": "Yes",
+ "module": "Chromeis Sync",
+ "name": "WHMCS Financial Summary",
+ "ref_doctype": "Sales Invoice",
+ "report_name": "WHMCS Financial Summary",
+ "report_type": "Script Report"
+}

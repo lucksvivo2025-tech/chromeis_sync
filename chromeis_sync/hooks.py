@@ -247,3 +247,12 @@ app_license = "mit"
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
 
+doc_events = {
+    "Customer": {
+        "onload": "chromeis_sync.api.get_customer_intelligence_dashboard"
+    }
+}
+
+doctype_js = {
+    "Customer": "public/js/customer_dashboard.js"
+}
