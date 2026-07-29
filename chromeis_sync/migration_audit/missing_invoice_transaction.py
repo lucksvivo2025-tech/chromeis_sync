@@ -82,8 +82,84 @@ class MissingInvoiceTransaction:
                 )
 
             # --------------------------------------------------
+            # DEBUG - Inspect invoice before insert
+            # --------------------------------------------------
+
+            print()
+            print("=" * 60)
+            print("DEBUG: INVOICE BEFORE INSERT")
+            print("=" * 60)
+
+            print(f"Invoice Currency : {invoice.currency}")
+            print(f"Net Total        : {invoice.net_total}")
+            print(f"Taxes            : {invoice.total_taxes_and_charges}")
+            print(f"Grand Total      : {invoice.grand_total}")
+            print()
+
+            print(f"Item Count : {len(invoice.items)}")
+            for i, item in enumerate(invoice.items, start=1):
+                print(
+                    {
+                        "row": i,
+                        "item_code": item.item_code,
+                        "description": item.description,
+                        "qty": item.qty,
+                        "rate": item.rate,
+                        "amount": item.amount,
+                    }
+                )
+
+            print()
+
+            print(f"Tax Count : {len(invoice.taxes)}")
+            for i, tax in enumerate(invoice.taxes, start=1):
+                print(
+                    {
+                        "row": i,
+                        "charge_type": tax.charge_type,
+                        "account_head": tax.account_head,
+                        "description": tax.description,
+                        "tax_amount": tax.tax_amount,
+                        "rate": tax.rate,
+                    }
+                )
+
+            print("=" * 60)
+
+            # --------------------------------------------------
             # Insert & Submit
             # --------------------------------------------------
+
+            invoice.set_missing_values()
+            invoice.calculate_taxes_and_totals()
+
+            print()
+            print("=" * 60)
+            print("DEBUG: AFTER CALCULATION")
+            print("=" * 60)
+            print(f"Net Total   : {invoice.net_total}")
+            print(f"Tax Total   : {invoice.total_taxes_and_charges}")
+            print(f"Grand Total : {invoice.grand_total}")
+
+            for item in invoice.items:
+                print(
+                    {
+                        "rate": item.rate,
+                        "amount": item.amount,
+                        "base_amount": item.base_amount,
+                        "net_amount": item.net_amount,
+                    }
+                 )
+
+            for tax in invoice.taxes:
+               print(
+                    {
+                        "charge_type": tax.charge_type,
+                        "tax_amount": tax.tax_amount,
+                        "base_tax_amount": tax.base_tax_amount,
+                        "total": tax.total,
+                    }
+                )
 
             invoice.insert()
 

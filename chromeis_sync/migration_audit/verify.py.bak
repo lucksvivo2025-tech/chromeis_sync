@@ -41,16 +41,6 @@ class InvoiceVerifier:
             )
 
         # ----------------------------------------------------
-        # Grand Total Validation
-        # ----------------------------------------------------
-
-        if round(float(old.get("grand_total", 0)), 2) != round(float(new_invoice.grand_total), 2):
-            result.passed = False
-            result.errors.append(
-                "Grand total mismatch"
-            )
-
-        # ----------------------------------------------------
         # Item Count Validation
         # ----------------------------------------------------
 
@@ -66,42 +56,58 @@ class InvoiceVerifier:
         # Item Validation
         # ----------------------------------------------------
 
-        for index, old_item in enumerate(snapshot["items"]):
+        def item_key(item):
+            return (
+                (item.get("description") or "").strip(),
+                round(float(item.get("qty", 0)), 6),
+            )
 
-            new_item = new_invoice.items[index]
+        old_items = {}
+
+        for item in snapshot["items"]:
+            old_items[item_key(item)] = item
+
+        for new_item in new_invoice.items:
+
+            key = (
+                (new_item.description or "").strip(),
+                round(float(new_item.qty), 6),
+            )
+
+            old_item = old_items.get(key)
+
+            if not old_item:
+                result.passed = False
+                result.errors.append(
+                    f"Unable to match rebuilt item: {new_item.description}"
+                )
+                continue
 
             comparisons = [
 
                 (
                     "item_code",
                     old_item.get("item_code"),
-                    new_item.item_code
+                     new_item.item_code,
                 ),
 
                 (
                     "qty",
                     round(float(old_item.get("qty", 0)), 6),
-                    round(float(new_item.qty), 6)
-                ),
-
-                (
-                    "rate",
-                    round(float(old_item.get("rate", 0)), 6),
-                    round(float(new_item.rate), 6)
+                    round(float(new_item.qty), 6),
                 ),
 
                 (
                     "income_account",
                     old_item.get("income_account"),
-                    new_item.income_account
+                    new_item.income_account,
                 ),
 
                 (
                     "cost_center",
                     old_item.get("cost_center"),
-                    new_item.cost_center
+                    new_item.cost_center,
                 ),
-
             ]
 
             for field, old_value, new_value in comparisons:
@@ -111,8 +117,8 @@ class InvoiceVerifier:
                     result.passed = False
 
                     result.errors.append(
-                        f"Item {index + 1}: {field} mismatch "
-                        f"({old_value} != {new_value})"
+                        f"{new_item.description[:40]}: "
+                        f"{field} mismatch ({old_value} != {new_value})"
                     )
 
         return result

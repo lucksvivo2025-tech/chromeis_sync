@@ -65,7 +65,22 @@ class PaymentTransaction:
             payment_entry.setup_party_account_field()
             payment_entry.set_missing_values()
             payment_entry.set_exchange_rate()
+
+            print("\nBEFORE set_amounts()")
+            for ref in payment_entry.references:
+                print(
+                    ref.reference_name,
+                    ref.allocated_amount,
+                )
+
             payment_entry.set_amounts()
+
+            print("\nAFTER set_amounts()")
+            for ref in payment_entry.references:
+                print(
+                    ref.reference_name,
+                    ref.allocated_amount,
+                )
 
             # --------------------------------------------------
             # Insert & Submit

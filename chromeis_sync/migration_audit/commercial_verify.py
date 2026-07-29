@@ -1,0 +1,131 @@
+import frappe
+from chromeis_sync.migration_audit.models import VerificationResult
+from chromeis_sync.migration_audit.classification import CommercialClassifier
+
+class CommercialVerifier:
+
+    def verify(self, snapshot, new_invoice, target_currency):
+
+        result = VerificationResult()
+
+        old = snapshot["header"]
+
+        # ----------------------------------------------------
+        # Identity Validation
+        # ----------------------------------------------------
+
+        identity_fields = [
+            "customer",
+            "company",
+            "custom_whmcs_client_id",
+            "whmcs_invoice_id",
+        ]
+
+        for field in identity_fields:
+
+            if old.get(field) != getattr(new_invoice, field, None):
+                result.passed = False
+                result.errors.append(
+                    f"{field} mismatch"
+                )
+
+        # ----------------------------------------------------
+        # Currency Validation
+        # ----------------------------------------------------
+
+        if new_invoice.currency != target_currency:
+            result.passed = False
+            result.errors.append(
+                f"Currency mismatch ({new_invoice.currency} != {target_currency})"
+            )
+
+        # ----------------------------------------------------
+        # Item Count Validation
+        # ----------------------------------------------------
+
+        if len(snapshot["whmcs_items"]) != len(new_invoice.items):
+
+
+            result.passed = False
+            result.errors.append(
+                "Item count mismatch"
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # Item Validation
+        # ----------------------------------------------------
+
+        def item_key(item):
+            return (
+                (item.get("description") or "").strip(),
+                round(float(item.get("qty", 0)), 6),
+            )
+
+        old_items = {}
+
+        for row in snapshot["whmcs_items"]:
+
+            expected = CommercialClassifier.map_whmcs_item(row)
+
+            expected["description"] = row.get("description")
+            expected["qty"] = expected.get("qty", 1)
+
+            old_items[item_key(expected)] = expected
+
+        for new_item in new_invoice.items:
+
+            key = (
+                (new_item.description or "").strip(),
+                round(float(new_item.qty), 6),
+            )
+
+            old_item = old_items.get(key)
+
+            if not old_item:
+                result.passed = False
+                result.errors.append(
+                    f"Unable to match rebuilt item: {new_item.description}"
+                )
+                continue
+
+            comparisons = [
+
+                (
+                    "item_code",
+                    old_item.get("item_code"),
+                     new_item.item_code,
+                ),
+
+                (
+                    "qty",
+                    round(float(old_item.get("qty", 0)), 6),
+                    round(float(new_item.qty), 6),
+                ),
+
+                (
+                    "income_account",
+                    old_item.get("income_account"),
+                    new_item.income_account,
+                ),
+
+                (
+                    "cost_center",
+                    old_item.get("cost_center"),
+                    new_item.cost_center,
+                ),
+            ]
+
+            for field, old_value, new_value in comparisons:
+
+                if old_value != new_value:
+
+                    result.passed = False
+
+                    result.errors.append(
+                        f"{new_item.description[:40]}: "
+                        f"{field} mismatch ({old_value} != {new_value})"
+                    )
+
+        return result

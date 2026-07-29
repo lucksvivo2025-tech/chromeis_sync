@@ -1,5 +1,8 @@
+import frappe
 import time
 from datetime import datetime
+
+import frappe
 
 from chromeis_sync.migration_audit.batch_logger import BatchLogger
 from chromeis_sync.migration_audit.batch_models import (
@@ -15,7 +18,7 @@ class InvoiceBatchRunner:
     def __init__(
         self,
         invoices,
-        target_currency,
+        target_currency=None,
         batch_size=None,
         continue_on_error=True,
     ):
@@ -44,6 +47,30 @@ class InvoiceBatchRunner:
                 f"[{index}/{total}] {invoice_name}"
             )
 
+            # Skip invoices that are already cancelled/draft
+            docstatus = frappe.db.get_value(
+                "Sales Invoice",
+                invoice_name,
+                "docstatus",
+            )
+
+            if docstatus != 1:
+
+                detail = BatchDetail(
+                    invoice_name=invoice_name,
+                    whmcs_invoice_id=None,
+                    status="SKIPPED",
+                    message=f"Invoice docstatus={docstatus}. Already repaired or not submitted.",
+                )
+
+                result.add(detail)
+
+                self.logger.warning(
+                    f"{invoice_name} skipped (docstatus={docstatus})"
+                )
+
+                continue
+
             # Capture snapshot for reporting
             snapshot = SnapshotService.create(invoice_name)
             whmcs_invoice_id = snapshot["header"].get("whmcs_invoice_id")
@@ -52,9 +79,18 @@ class InvoiceBatchRunner:
 
             try:
 
+                currency = self.target_currency
+
+                if currency is None:
+                    currency = frappe.db.get_value(
+                        "Sales Invoice",
+                        invoice_name,
+                        "currency",
+                    )
+
                 tx = InvoiceTransaction(
                     invoice_name,
-                    self.target_currency,
+                    currency,
                 )
 
                 tx_result = tx.execute()
@@ -73,8 +109,7 @@ class InvoiceBatchRunner:
                 result.add(detail)
 
                 self.logger.success(
-                    f"{invoice_name} -> {tx_result.new_invoice} "
-                    f"({duration:.2f}s)"
+                    f"{invoice_name} -> {tx_result.new_invoice} ({duration:.2f}s)"
                 )
 
             except Exception as exc:

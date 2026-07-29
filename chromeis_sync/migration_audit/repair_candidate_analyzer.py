@@ -41,7 +41,45 @@ class RepairCandidateAnalyzer:
         candidate.has_gl = gl_count > 0
 
         # --------------------------------------------------
-        # Currency Validation
+        # WHMCS Currency Validation
+        # --------------------------------------------------
+
+        whmcs_currency = frappe.db.sql(
+            """
+            SELECT cur.code
+            FROM whmcs_mirror.tblinvoices i
+            JOIN whmcs_mirror.tblclients c
+                ON c.id = i.userid
+            JOIN whmcs_mirror.tblcurrencies cur
+                ON cur.id = c.currency
+            WHERE i.id = %s
+            """,
+            (invoice.whmcs_invoice_id,),
+            as_dict=True,
+        )
+
+        if whmcs_currency:
+
+            whmcs_currency = whmcs_currency[0]["code"]
+
+            if (
+                invoice.currency == "PKR"
+                and whmcs_currency == "USD"
+                and float(invoice.conversion_rate or 0) == 1.0
+            ):
+
+                candidate.status = "REPAIR"
+                candidate.repair_required = True
+                candidate.target_currency = "USD"
+
+                candidate.reasons.append(
+                    "ERP currency differs from WHMCS currency"
+                )
+
+                return candidate
+
+        # --------------------------------------------------
+        # Existing Currency Validation
         # --------------------------------------------------
 
         if candidate.currency == "PKR":
@@ -69,10 +107,6 @@ class RepairCandidateAnalyzer:
         # --------------------------------------------------
 
         if not candidate.has_gl:
-
-            # Tiny invoice after currency conversion.
-            # ERPNext legitimately creates no GL because
-            # the base amount rounds to zero.
 
             if abs(float(invoice.base_grand_total or 0)) < 0.01:
 

@@ -1,0 +1,908 @@
+"""
+report.py — WHMCS -> ERPNext Migration Audit Report
+=====================================================
+
+PART 1/4: Framework + class + header/section helpers
+PART 2/4: WHMCS summary / ERP summary / migration metrics
+
+SCHEMA ASSUMPTIONS (adjust to match your actual environment):
+  WHMCS (raw MySQL, via pymysql):
+    tblinvoices(id, userid, date, duedate, datepaid, subtotal, tax, total,
+                status, currency, invoicenum)
+    tblclients(id, currency, email, firstname, lastname)
+    tblcurrencies(id, code)
+
+  ERPNext (via frappe ORM, Sales Invoice doctype):
+    Sales Invoice(name, customer, currency, posting_date, due_date,
+                  grand_total, outstanding_amount, status, docstatus,
+                  cost_center, debit_to, company)
+    Custom field expected on Sales Invoice: whmcs_invoice_id (Data/Int)
+
+If your actual tables/fields differ, the SQL strings and frappe.get_all()
+filters below are the only things that need to change — the audit logic
+itself is schema-agnostic.
+"""
+
+import time
+from chromeis_sync.migration_audit.application.invoice_reconciliation_engine import (
+    InvoiceReconciliationEngine,
+)
+from collections import defaultdict
+from datetime import datetime
+
+import frappe
+import frappe
+
+from ..core.base_report import BaseReport
+
+class MigrationAuditReport(BaseReport):
+    """
+    Reconciliation & audit report comparing WHMCS billing history against
+    its migrated representation inside ERPNext.
+
+    Usage:
+        report = MigrationAuditReport(
+            whmcs_conn_config={
+                "host": "localhost",
+                "user": "whmcs_ro",
+                "password": "...",
+                "database": "whmcs",
+                "port": 3306,
+            },
+            company="Chromeis Pvt Ltd",
+        )
+        report.execute()
+    """
+
+    # Severity ordering used to compute the overall rollup status.
+    # Index position = severity rank (higher index = worse).
+    STATUS_ORDER = ["PASS", "WARN", "FAIL", "CRITICAL"]
+
+    def __init__(self, company: str = None, verbose: bool = True):
+        """
+        Args:
+            whmcs_conn_config: dict with keys host, user, password, database, port
+                               for a READ-ONLY MySQL user against the WHMCS DB.
+            company: ERPNext company name to scope invoice queries. If None,
+                     queries run across all companies (use with caution on
+                     multi-company setups — you likely want to scope this).
+            verbose: if True, print section output to stdout as it runs.
+                     If False, still populates all internal state so callers
+                     can inspect report.exceptions / report.metrics etc.
+                     programmatically without console noise.
+        """
+        self.invoice_engine = InvoiceReconciliationEngine()
+
+        super().__init__()
+
+        self.whmcs_db = "whmcs_mirror"
+        self.erp_db = frappe.conf.db_name
+
+        self.company = company
+        self.verbose = verbose
+
+        # ---- Timing ----
+        self.start_time = None
+        self.end_time = None
+
+        # ---- Data caches populated during load_invoice_ids() ----
+        self.whmcs_invoice_ids = set()
+        self.erp_invoice_ids = set()
+        # whmcs_invoice_id (int) -> erp Sales Invoice name (str)
+        self.whmcs_to_erp_map = {}
+        # erp Sales Invoice name (str) -> whmcs_invoice_id (int)
+        self.erp_to_whmcs_map = {}
+
+        # Raw row caches, keyed by whmcs invoice id / erp invoice name,
+        # populated in load_invoice_maps(). Kept separate from the id
+        # sets above so downstream audits don't need to re-query.
+        self.whmcs_invoice_rows = {}   # whmcs_invoice_id -> dict of row fields
+        self.erp_invoice_rows = {}     # erp invoice name -> dict of row fields
+
+        # Business Objects
+        self.whmcs_invoices = {}   # whmcs_invoice_id -> Invoice
+
+        # ---- Summary stat containers (Step 2) ----
+        self.whmcs_stats = {}
+        self.erp_stats = {}
+        self.metrics = {}
+
+        # ---- Audit result containers (Step 4/5) ----
+        self.duplicates = []            # list of dicts
+        self.missing_in_erp = []        # whmcs invoices with no ERP counterpart
+        self.orphans_in_erp = []        # ERP invoices with no WHMCS counterpart
+        self.field_mismatches = defaultdict(list)  # category -> list of mismatch dicts
+
+        # ---- Exceptions / findings log (Step 6) ----
+        # Every add_exception() call appends here. This is the single
+        # source of truth the final summary rolls up from — audits should
+        # never compute PASS/FAIL independently of this list.
+        self.exceptions = []  # list of {severity, category, message, context}
+
+        # ---- Console section bookkeeping ----
+        self._section_open = False
+        self._section_start_time = None
+        self._current_section_name = None
+
+    # ------------------------------------------------------------------
+    # Step 1 — Foundation
+    # ------------------------------------------------------------------
+
+    def _emit(self, text: str = ""):
+        """Central print gate so verbose=False fully silences console output
+        without scattering `if self.verbose` checks through every method."""
+        if self.verbose:
+            print(text)
+
+    def print_header(self):
+        self.start_time = time.time()
+        self._emit("=" * 78)
+        self._emit("WHMCS -> ERPNext MIGRATION AUDIT REPORT")
+        self._emit(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        if self.company:
+            self._emit(f"Company scope: {self.company}")
+        self._emit("=" * 78)
+        self._emit()
+
+    def section(self, title: str):
+        """Open a named section. Always paired with end_section() — enforced
+        loosely via _section_open so mismatched calls are visible in output
+        rather than silently merging sections together."""
+        if self._section_open:
+            # Defensive: close any dangling section before opening a new one
+            # so a forgotten end_section() call doesn't corrupt formatting.
+            self.end_section()
+        self._section_open = True
+        self._section_start_time = time.time()
+        self._current_section_name = title
+        self._emit(f"\n--- {title} " + "-" * max(0, 74 - len(title)))
+
+    def end_section(self):
+        if not self._section_open:
+            return
+        elapsed = time.time() - self._section_start_time
+        self._emit(f"[{self._current_section_name}] completed in {elapsed:.2f}s")
+        self._section_open = False
+        self._current_section_name = None
+
+
+    # ------------------------------------------------------------------
+    # WHMCS Mirror helper
+    # ------------------------------------------------------------------
+
+from chromeis_sync.migration_audit.infrastructure.whmcs import WHMCSDatabase
+
+    def _whmcs_query(self, sql, params=()):
+        return WHMCSDatabase.query(sql, params)
+
+        """
+        Execute a query against the local WHMCS mirror database.
+
+        The ERP MariaDB server hosts the WHMCS mirror as a separate
+        database (whmcs_mirror), so no external MySQL connection is
+        required.
+        """
+
+        sql = sql.replace("FROM tbl", "FROM whmcs_mirror.tbl")
+        sql = sql.replace("JOIN tbl", "JOIN whmcs_mirror.tbl")
+        sql = sql.replace("UPDATE tbl", "UPDATE whmcs_mirror.tbl")
+        sql = sql.replace("INTO tbl", "INTO whmcs_mirror.tbl")
+
+        return frappe.db.sql(sql, values=params, as_dict=True)
+
+    # ------------------------------------------------------------------
+    # Step 2 — Statistics
+    # ------------------------------------------------------------------
+
+    def whmcs_summary(self):
+        self.section("WHMCS Summary")
+        rows = self._whmcs_query(
+            """
+            SELECT
+                COUNT(*)                                   AS invoice_count,
+                SUM(CASE WHEN status = 'Paid' THEN 1 ELSE 0 END)   AS paid_count,
+                SUM(CASE WHEN status = 'Unpaid' THEN 1 ELSE 0 END) AS unpaid_count,
+                SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
+                SUM(CASE WHEN status = 'Refunded' THEN 1 ELSE 0 END)  AS refunded_count,
+                SUM(total)                                 AS total_amount,
+                MIN(date)                                  AS earliest_date,
+                MAX(date)                                  AS latest_date
+            FROM tblinvoices
+            """
+        )
+        row = rows[0] if rows else {}
+        self.whmcs_stats = {
+            "invoice_count": row.get("invoice_count") or 0,
+            "paid_count": row.get("paid_count") or 0,
+            "unpaid_count": row.get("unpaid_count") or 0,
+            "cancelled_count": row.get("cancelled_count") or 0,
+            "refunded_count": row.get("refunded_count") or 0,
+            "total_amount": float(row.get("total_amount") or 0),
+            "earliest_date": row.get("earliest_date"),
+            "latest_date": row.get("latest_date"),
+        }
+        self._emit(f"Total invoices        : {self.whmcs_stats['invoice_count']}")
+        self._emit(f"  Paid                : {self.whmcs_stats['paid_count']}")
+        self._emit(f"  Unpaid              : {self.whmcs_stats['unpaid_count']}")
+        self._emit(f"  Cancelled           : {self.whmcs_stats['cancelled_count']}")
+        self._emit(f"  Refunded            : {self.whmcs_stats['refunded_count']}")
+        self._emit(f"Total invoiced amount : {self.whmcs_stats['total_amount']:.2f}")
+        self._emit(f"Date range            : {self.whmcs_stats['earliest_date']} -> {self.whmcs_stats['latest_date']}")
+        self.end_section()
+
+    def erp_summary(self):
+        self.section("ERPNext Summary")
+        filters = {"docstatus": ["!=", 2]}  # exclude cancelled docs by docstatus
+        if self.company:
+            filters["company"] = self.company
+
+        rows = frappe.get_all(
+            "Sales Invoice",
+            filters=filters,
+            fields=["name", "status", "grand_total", "outstanding_amount", "posting_date", "whmcs_invoice_id"],
+        )
+
+        status_counts = defaultdict(int)
+        total_amount = 0.0
+        with_whmcs_link = 0
+        dates = []
+        for r in rows:
+            status_counts[r["status"]] += 1
+            total_amount += float(r.get("grand_total") or 0)
+            if r.get("whmcs_invoice_id"):
+                with_whmcs_link += 1
+            if r.get("posting_date"):
+                dates.append(r["posting_date"])
+
+        self.erp_stats = {
+            "invoice_count": len(rows),
+            "status_counts": dict(status_counts),
+            "total_amount": total_amount,
+            "with_whmcs_link": with_whmcs_link,
+            "without_whmcs_link": len(rows) - with_whmcs_link,
+            "earliest_date": min(dates) if dates else None,
+            "latest_date": max(dates) if dates else None,
+        }
+        self._emit(f"Total Sales Invoices  : {self.erp_stats['invoice_count']}")
+        for status, count in sorted(status_counts.items()):
+            self._emit(f"  {status:<18}: {count}")
+        self._emit(f"Total grand_total sum : {self.erp_stats['total_amount']:.2f}")
+        self._emit(f"Linked to WHMCS       : {self.erp_stats['with_whmcs_link']}")
+        self._emit(f"Missing WHMCS link    : {self.erp_stats['without_whmcs_link']}")
+        self._emit(f"Date range            : {self.erp_stats['earliest_date']} -> {self.erp_stats['latest_date']}")
+        self.end_section()
+
+    def migration_metrics(self):
+        self.section("Migration Metrics")
+        whmcs_count = self.whmcs_stats.get("invoice_count", 0)
+        erp_linked = self.erp_stats.get("with_whmcs_link", 0)
+
+        pct_migrated = (erp_linked / whmcs_count * 100) if whmcs_count else 0.0
+        amount_delta = self.whmcs_stats.get("total_amount", 0.0) - self.erp_stats.get("total_amount", 0.0)
+
+        self.metrics = {
+            "pct_migrated": pct_migrated,
+            "whmcs_invoice_count": whmcs_count,
+            "erp_linked_count": erp_linked,
+            "erp_unlinked_count": self.erp_stats.get("without_whmcs_link", 0),
+            "aggregate_amount_delta": amount_delta,
+        }
+        self._emit(f"Migration coverage    : {pct_migrated:.2f}% ({erp_linked}/{whmcs_count})")
+        self._emit(f"Aggregate amount delta: {amount_delta:.2f}  (WHMCS total - ERP total)")
+
+        # NOTE: this aggregate delta is a headline number only. Per the
+        # architecture discussion, offsetting errors can net to ~0 here —
+        # duplicate_audit / missing_invoice_audit / field_data_integrity_audit
+        # below do the real per-record reconciliation. Don't treat a small
+        # delta here as proof the migration is correct.
+        if abs(amount_delta) > 0.01:
+            self.add_exception(
+                severity="WARN",
+                category="aggregate_amount_delta",
+                message=f"Aggregate WHMCS/ERP total mismatch of {amount_delta:.2f}",
+                context={"whmcs_total": self.whmcs_stats.get("total_amount"), "erp_total": self.erp_stats.get("total_amount")},
+            )
+        self.end_section()
+    # ------------------------------------------------------------------
+    # Step 3 — Data Loading
+    # ------------------------------------------------------------------
+
+    def invoice_classification_summary(self):
+
+        self.section("Invoice Classification")
+
+        summary = self.invoice_engine.classification_summary(
+            self.whmcs_invoices.values()
+        )
+
+        for classification, count in sorted(summary.items()):
+            self._emit(f"{classification:<25} : {count}")
+
+        self.end_section()
+
+    def load_whmcs_invoice_ids(self):
+        rows = self._whmcs_query("SELECT id FROM tblinvoices")
+        self.whmcs_invoice_ids = {int(r["id"]) for r in rows}
+
+    def load_erp_invoice_ids(self):
+        filters = {"docstatus": ["!=", 2]}
+        if self.company:
+            filters["company"] = self.company
+        rows = frappe.get_all("Sales Invoice", filters=filters, fields=["name", "whmcs_invoice_id"])
+        self.erp_invoice_ids = {r["name"] for r in rows}
+        # Build the id<->name maps here too, since we already have the rows.
+        for r in rows:
+            wid = r.get("whmcs_invoice_id")
+            if wid:
+                try:
+                    wid = int(wid)
+                except (TypeError, ValueError):
+                    # Non-numeric whmcs_invoice_id is itself a data integrity
+                    # problem — log it rather than silently skipping.
+                    self.add_exception(
+                        severity="FAIL",
+                        category="malformed_whmcs_link",
+                        message=f"ERP invoice {r['name']} has non-numeric whmcs_invoice_id: {r.get('whmcs_invoice_id')!r}",
+                        context={"erp_invoice": r["name"]},
+                    )
+                    continue
+                self.whmcs_to_erp_map[wid] = r["name"]
+                self.erp_to_whmcs_map[r["name"]] = wid
+
+    def load_invoice_maps(self):
+        """Populate full row caches (not just ids) for both sides, keyed for
+        O(1) lookup by downstream audits. Runs after load_whmcs_invoice_ids()
+        and load_erp_invoice_ids() so the id sets/maps already exist."""
+
+        whmcs_rows = self._whmcs_query(
+        """
+        SELECT
+            i.id,
+            i.userid,
+            i.date,
+            i.duedate,
+            i.datepaid,
+            i.subtotal,
+            i.credit,
+            i.tax,
+            i.total,
+            i.status,
+            i.invoicenum,
+            cur.code AS currency
+        FROM tblinvoices i
+        LEFT JOIN tblclients c
+            ON c.id = i.userid
+        LEFT JOIN tblcurrencies cur
+            ON cur.id = c.currency
+        """
+        )
+        for r in whmcs_rows:
+            self.whmcs_invoice_rows[int(r["id"])] = r
+
+        filters = {"docstatus": ["!=", 2]}
+        if self.company:
+            filters["company"] = self.company
+        erp_rows = frappe.get_all(
+            "Sales Invoice",
+            filters=filters,
+            fields=[
+                "name", "customer", "currency", "posting_date", "due_date",
+                "grand_total", "outstanding_amount", "status", "docstatus",
+                "cost_center", "debit_to", "company", "whmcs_invoice_id",
+            ],
+        )
+        for r in erp_rows:
+            self.erp_invoice_rows[r["name"]] = r
+
+    def build_invoice_objects(self):
+        """
+        Convert cached WHMCS invoice rows into strongly-typed Invoice objects.
+        """
+
+        self.section("Building Invoice Objects")
+
+        self.whmcs_invoices = {}
+
+        for invoice_id, row in self.whmcs_invoice_rows.items():
+
+            invoice = self.invoice_engine.build_invoice(row)
+
+            self.whmcs_invoices[invoice_id] = invoice
+
+        self._emit(
+            f"Invoice business objects built : {len(self.whmcs_invoices)}"
+        )
+
+        self.end_section()
+
+    def load_invoice_ids(self):
+        """Convenience wrapper matching the execute() call signature — runs
+        all three loading steps in the correct order."""
+        self.section("Loading Invoice IDs")
+        self.load_whmcs_invoice_ids()
+        self.load_erp_invoice_ids()
+        self.load_invoice_maps()
+        self.build_invoice_objects()
+        self._emit(f"WHMCS invoice ids loaded : {len(self.whmcs_invoice_ids)}")
+        self._emit(f"ERP invoice ids loaded   : {len(self.erp_invoice_ids)}")
+        self._emit(f"WHMCS<->ERP links built  : {len(self.whmcs_to_erp_map)}")
+        self.end_section()
+
+    # ------------------------------------------------------------------
+    # Step 4 — Core Audits
+    # ------------------------------------------------------------------
+
+    def invoice_count_validation(self):
+        self.section("Invoice Count Validation")
+        whmcs_count = len(self.whmcs_invoice_ids)
+        erp_linked_count = len(self.whmcs_to_erp_map)
+        delta = whmcs_count - erp_linked_count
+
+        self._emit(f"WHMCS invoice count      : {whmcs_count}")
+        self._emit(f"ERP linked invoice count : {erp_linked_count}")
+        self._emit(f"Delta                    : {delta}")
+
+        if delta != 0:
+            self.add_exception(
+                severity="WARN" if delta > 0 else "FAIL",
+                category="invoice_count_mismatch",
+                message=(
+                    f"WHMCS has {whmcs_count} invoices but only {erp_linked_count} "
+                    f"are linked from ERP (delta={delta})."
+                ),
+                context={"whmcs_count": whmcs_count, "erp_linked_count": erp_linked_count},
+            )
+            # A negative delta (more ERP-linked invoices than WHMCS invoices
+            # exist) means WHMCS ids are being double-linked somewhere — that
+            # is more serious than "migration incomplete", hence FAIL not WARN.
+        self.end_section()
+
+    def duplicate_audit(self):
+        """Detect WHMCS invoice ids linked to more than one ERP Sales Invoice.
+        This is the single most dangerous failure mode for an accounting
+        migration: it means the same revenue event was recognized twice."""
+        self.section("Duplicate Audit")
+        reverse_map = defaultdict(list)
+        for erp_name, wid in self.erp_to_whmcs_map.items():
+            reverse_map[wid].append(erp_name)
+
+        self.duplicates = []
+        for wid, erp_names in reverse_map.items():
+            if len(erp_names) > 1:
+                dup = {"whmcs_invoice_id": wid, "erp_invoices": erp_names}
+                self.duplicates.append(dup)
+                self.add_exception(
+                    severity="CRITICAL",
+                    category="duplicate_migration",
+                    message=f"WHMCS invoice {wid} is linked to {len(erp_names)} ERP invoices: {erp_names}",
+                    context=dup,
+                )
+
+        self._emit(f"Duplicate WHMCS links found: {len(self.duplicates)}")
+        for d in self.duplicates[:20]:  # cap console spam; full list is in self.duplicates
+            self._emit(f"  WHMCS #{d['whmcs_invoice_id']} -> {d['erp_invoices']}")
+        if len(self.duplicates) > 20:
+            self._emit(f"  ... and {len(self.duplicates) - 20} more (see report.duplicates)")
+        self.end_section()
+
+    def missing_invoice_audit(self):
+        """WHMCS invoices with no ERP counterpart at all — these represent
+        billing history that has not yet been migrated (or was migrated and
+        the link silently failed)."""
+        self.section("Missing Invoice Audit")
+        missing_ids = self.whmcs_invoice_ids - set(self.whmcs_to_erp_map.keys())
+        self.missing_in_erp = sorted(missing_ids)
+
+        self._emit(f"WHMCS invoices with no ERP counterpart: {len(self.missing_in_erp)}")
+        if self.missing_in_erp:
+            preview = self.missing_in_erp[:20]
+            self._emit(f"  Sample ids: {preview}")
+            if len(self.missing_in_erp) > 20:
+                self._emit(f"  ... and {len(self.missing_in_erp) - 20} more (see report.missing_in_erp)")
+
+            self.add_exception(
+                severity="WARN",
+                category="missing_migration",
+                message=f"{len(self.missing_in_erp)} WHMCS invoices have not been migrated to ERP.",
+                context={"count": len(self.missing_in_erp), "sample_ids": preview},
+            )
+        self.end_section()
+
+    def cancelled_invoice_audit(self):
+        """
+        Detect WHMCS invoices whose ERP counterpart exists but has been
+        cancelled (docstatus = 2).
+
+        These invoices should not be counted as successfully migrated,
+        but they are different from invoices that never reached ERP.
+        """
+
+        self.section("Cancelled ERP Invoice Audit")
+
+        self.cancelled_in_erp = []
+
+        if not hasattr(self, "missing_in_erp"):
+            self._emit("Run missing_invoice_audit() first.")
+            self.end_section()
+            return
+
+        for wid in self.missing_in_erp:
+
+            rows = frappe.get_all(
+                "Sales Invoice",
+                filters={
+                    "docstatus": 2,
+                    "whmcs_invoice_id": str(wid),
+                },
+                fields=[
+                    "name",
+                    "status",
+                    "posting_date",
+                    "grand_total",
+                    "customer",
+                ],
+            )
+
+            if rows:
+                self.cancelled_in_erp.append(
+                    {
+                        "whmcs_invoice_id": wid,
+                        **rows[0],
+                    }
+                )
+
+        self._emit(
+            f"WHMCS invoices found as Cancelled ERP invoices: {len(self.cancelled_in_erp)}"
+        )
+
+        for row in self.cancelled_in_erp[:20]:
+            self._emit(
+                f"  WHMCS #{row['whmcs_invoice_id']} -> "
+                f"{row['name']} (Cancelled)"
+            )
+
+        if len(self.cancelled_in_erp) > 20:
+            self._emit(
+                f"  ... and {len(self.cancelled_in_erp)-20} more "
+                "(see report.cancelled_in_erp)"
+            )
+
+        if self.cancelled_in_erp:
+            self.add_exception(
+                severity="WARN",
+                category="cancelled_erp_invoice",
+                message=(
+                    f"{len(self.cancelled_in_erp)} WHMCS invoices exist "
+                    "in ERP but are cancelled."
+                ),
+                context={
+                    "count": len(self.cancelled_in_erp)
+                },
+            )
+
+        self.end_section()
+
+    def orphan_invoice_audit(self):
+        """ERP Sales Invoices carrying a whmcs_invoice_id that does not exist
+        in WHMCS at all. This usually means either a WHMCS invoice was
+        deleted/renumbered after migration, or the link field was populated
+        incorrectly during a manual fix — both are worth flagging loudly
+        rather than assuming the ERP side is automatically trustworthy."""
+        self.section("Orphan Invoice Audit")
+        orphan_ids = set(self.whmcs_to_erp_map.keys()) - self.whmcs_invoice_ids
+        self.orphans_in_erp = [
+            {"whmcs_invoice_id": wid, "erp_invoice": self.whmcs_to_erp_map[wid]}
+            for wid in sorted(orphan_ids)
+        ]
+
+        self._emit(f"ERP invoices linked to a non-existent WHMCS id: {len(self.orphans_in_erp)}")
+        for o in self.orphans_in_erp[:20]:
+            self._emit(f"  ERP {o['erp_invoice']} -> WHMCS #{o['whmcs_invoice_id']} (not found)")
+        if len(self.orphans_in_erp) > 20:
+            self._emit(f"  ... and {len(self.orphans_in_erp) - 20} more (see report.orphans_in_erp)")
+
+        if self.orphans_in_erp:
+            self.add_exception(
+                severity="FAIL",
+                category="orphan_erp_link",
+                message=f"{len(self.orphans_in_erp)} ERP invoices reference a WHMCS invoice id that no longer exists.",
+                context={"count": len(self.orphans_in_erp)},
+            )
+        self.end_section()
+    # ------------------------------------------------------------------
+    # Step 5 — Integrity Audit
+    # ------------------------------------------------------------------
+    #
+    # Each of these five checks only runs against invoices that ARE linked
+    # (i.e. present in whmcs_to_erp_map) — mismatches on unmigrated invoices
+    # are already captured by missing_invoice_audit() and would just be
+    # noise here.
+
+    def _linked_pairs(self):
+        """Yields (whmcs_row, erp_row) for every successfully linked pair."""
+        for wid, erp_name in self.whmcs_to_erp_map.items():
+            whmcs_row = self.whmcs_invoice_rows.get(wid)
+            erp_row = self.erp_invoice_rows.get(erp_name)
+            if whmcs_row is not None and erp_row is not None:
+                yield whmcs_row, erp_row
+
+    def _currency_integrity_check(self):
+        """
+        Confirms the ERP invoice currency matches the WHMCS invoice currency.
+        """
+
+        mismatches = []
+
+        for whmcs_row, erp_row in self._linked_pairs():
+
+            whmcs_ccy = (whmcs_row.get("currency") or "").strip().upper()
+            erp_ccy = (erp_row.get("currency") or "").strip().upper()
+
+            if whmcs_ccy != erp_ccy:
+                mismatches.append({
+                    "whmcs_invoice_id": whmcs_row["id"],
+                    "erp_invoice": erp_row["name"],
+                    "whmcs_currency": whmcs_ccy,
+                    "erp_currency": erp_ccy,
+                })
+
+        return mismatches
+
+    def _customer_integrity_check(self):
+        """Confirms the ERP customer resolves back to the same WHMCS client.
+        ASSUMPTION: ERP Customer doctype carries a whmcs_client_id custom
+        field. If your customer mapping is stored differently (e.g. a
+        separate mapping table), swap the lookup below accordingly."""
+        mismatches = []
+        client_cache = {}
+
+        for whmcs_row, erp_row in self._linked_pairs():
+            whmcs_client_id = whmcs_row.get("userid")
+            customer = erp_row.get("customer")
+            if customer not in client_cache:
+                client_cache[customer] = frappe.db.get_value(
+                    "Customer", customer, "whmcs_client_id"
+                )
+            erp_client_id = client_cache[customer]
+
+            if erp_client_id and str(erp_client_id) != str(whmcs_client_id):
+                mismatches.append({
+                    "whmcs_invoice_id": whmcs_row["id"],
+                    "erp_invoice": erp_row["name"],
+                    "whmcs_client_id": whmcs_client_id,
+                    "erp_customer": customer,
+                    "erp_client_id": erp_client_id,
+                })
+        return mismatches
+
+    def _status_integrity_check(self):
+
+        mismatches = []
+
+        for whmcs_row, erp_row in self._linked_pairs():
+
+            invoice = self.whmcs_invoices.get(whmcs_row["id"])
+
+            if invoice is None:
+                continue
+
+            allowed = self.invoice_engine.expected_erp_statuses(invoice)
+
+            # No status policy for this classification
+            if not allowed:
+                continue
+
+            erp_status = erp_row.get("status")
+
+            if erp_status not in allowed:
+
+                mismatches.append({
+                    "whmcs_invoice_id": invoice.id,
+                    "classification": invoice.classification.value,
+                    "erp_invoice": erp_row["name"],
+                    "erp_status": erp_status,
+                    "expected_erp_status": sorted(allowed),
+                })
+
+        return mismatches
+
+    def _date_integrity_check(self):
+        mismatches = []
+        for whmcs_row, erp_row in self._linked_pairs():
+            whmcs_date = whmcs_row.get("date")
+            erp_date = erp_row.get("posting_date")
+            if whmcs_date and erp_date and str(whmcs_date) != str(erp_date):
+                mismatches.append({
+                    "whmcs_invoice_id": whmcs_row["id"],
+                    "erp_invoice": erp_row["name"],
+                    "whmcs_date": str(whmcs_date),
+                    "erp_posting_date": str(erp_date),
+                })
+        return mismatches
+
+    def _amount_integrity_check(self, tolerance: float = 0.01):
+        """Tolerance guards against float rounding noise only — anything
+        beyond a cent or two is a real accounting discrepancy, not rounding."""
+        mismatches = []
+        for whmcs_row, erp_row in self._linked_pairs():
+            whmcs_total = float(whmcs_row.get("total") or 0)
+            erp_total = float(erp_row.get("grand_total") or 0)
+            delta = round(whmcs_total - erp_total, 2)
+            if abs(delta) > tolerance:
+                mismatches.append({
+                    "whmcs_invoice_id": whmcs_row["id"],
+                    "erp_invoice": erp_row["name"],
+                    "whmcs_total": whmcs_total,
+                    "erp_grand_total": erp_total,
+                    "delta": delta,
+                })
+        return mismatches
+
+    def _status_integrity_check(self):
+        """WHMCS status -> expected ERP status/docstatus, per the state
+        machine agreed in the architecture doc. Adjust the map below if your
+        recognition policy differs (e.g. revenue recognized on invoice
+        creation rather than on payment)."""
+        expected_map = {
+            "Paid": {"Paid"},
+            "Unpaid": {"Unpaid", "Overdue", "Draft"},
+            "Cancelled": {"Cancelled"},
+            "Refunded": {"Return", "Credit Note Issued", "Cancelled"},
+        }
+        mismatches = []
+        for whmcs_row, erp_row in self._linked_pairs():
+            whmcs_status = whmcs_row.get("status")
+            erp_status = erp_row.get("status")
+            allowed = expected_map.get(whmcs_status)
+            if allowed and erp_status not in allowed:
+                mismatches.append({
+                    "whmcs_invoice_id": whmcs_row["id"],
+                    "erp_invoice": erp_row["name"],
+                    "whmcs_status": whmcs_status,
+                    "erp_status": erp_status,
+                    "expected_erp_status": sorted(allowed),
+                })
+        return mismatches
+
+    def field_data_integrity_audit(self):
+        self.section("Field Data Integrity Audit")
+
+        checks = [
+            ("customer", self._customer_integrity_check, "FAIL"),
+            ("currency", self._currency_integrity_check, "CRITICAL"),
+            ("date", self._date_integrity_check, "WARN"),
+            ("amount", self._amount_integrity_check, "CRITICAL"),
+            ("status", self._status_integrity_check, "WARN"),
+        ]
+
+        for category, check_fn, severity in checks:
+            mismatches = check_fn()
+            self.field_mismatches[category] = mismatches
+            self._emit(f"{category.capitalize():<10}: {len(mismatches)} mismatch(es)")
+            for m in mismatches[:10]:
+                self._emit(f"    {m}")
+            if len(mismatches) > 10:
+                self._emit(f"    ... and {len(mismatches) - 10} more (see report.field_mismatches['{category}'])")
+
+            if mismatches:
+                self.add_exception(
+                    severity=severity,
+                    category=f"{category}_mismatch",
+                    message=f"{len(mismatches)} invoice(s) failed {category} integrity check.",
+                    context={"count": len(mismatches), "sample": mismatches[:5]},
+                )
+        self.end_section()
+
+    # ------------------------------------------------------------------
+    # Step 6 — Exceptions
+    # ------------------------------------------------------------------
+
+    def add_exception(self, severity: str, category: str, message: str, context: dict = None):
+        if severity not in self.STATUS_ORDER:
+            raise ValueError(f"Unknown severity '{severity}', must be one of {self.STATUS_ORDER}")
+        self.exceptions.append({
+            "severity": severity,
+            "category": category,
+            "message": message,
+            "context": context or {},
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        })
+
+    def exception_summary(self):
+        self.section("Exception Summary")
+        if not self.exceptions:
+            self._emit("No exceptions recorded.")
+            self.end_section()
+            return
+
+        by_severity = defaultdict(list)
+        for exc in self.exceptions:
+            by_severity[exc["severity"]].append(exc)
+
+        for severity in reversed(self.STATUS_ORDER):  # CRITICAL first, most urgent on top
+            group = by_severity.get(severity, [])
+            if not group:
+                continue
+            self._emit(f"\n{severity} ({len(group)}):")
+            for exc in group:
+                self._emit(f"  [{exc['category']}] {exc['message']}")
+        self.end_section()
+
+    # ------------------------------------------------------------------
+    # Step 7 — Final Summary
+    # ------------------------------------------------------------------
+
+    def audit_summary(self):
+        self.section("Audit Summary")
+
+        severity_counts = defaultdict(int)
+        for exc in self.exceptions:
+            severity_counts[exc["severity"]] += 1
+
+        for severity in self.STATUS_ORDER:
+            self._emit(f"{severity:<10}: {severity_counts.get(severity, 0)}")
+
+        overall_status = "PASS"
+        for severity in self.STATUS_ORDER:
+            if severity_counts.get(severity, 0) > 0:
+                overall_status = severity  # keeps overwriting up to the worst severity present
+
+        self.metrics["overall_status"] = overall_status
+        self.metrics["exception_counts"] = dict(severity_counts)
+
+        self.end_time = time.time()
+        elapsed = self.end_time - (self.start_time or self.end_time)
+
+        self._emit(f"\nOVERALL STATUS: {overall_status}")
+        self._emit(f"Total runtime  : {elapsed:.2f}s")
+        self.end_section()
+
+        self._emit("\n" + "=" * 78)
+        self._emit(f"AUDIT COMPLETE — OVERALL STATUS: {overall_status}")
+        self._emit("=" * 78)
+
+        return overall_status
+
+    # ------------------------------------------------------------------
+    # Step 8 — Execute
+    # ------------------------------------------------------------------
+
+    def execute(self):
+        self.print_header()
+        self.whmcs_summary()
+        self.erp_summary()
+        self.migration_metrics()
+        self.load_invoice_ids()
+        self.invoice_classification_summary()
+        self.invoice_count_validation()
+        self.duplicate_audit()
+        self.missing_invoice_audit()
+        self.cancelled_invoice_audit()
+        self.orphan_invoice_audit()
+
+        self.field_data_integrity_audit()
+        self.exception_summary()
+        self.audit_summary()
+        return self.metrics.get("overall_status")
+
+
+# ----------------------------------------------------------------------
+# Example usage (bench execute, or a standalone script with frappe.init())
+# ----------------------------------------------------------------------
+#
+# from report import MigrationAuditReport
+#
+# report = MigrationAuditReport(
+#     whmcs_conn_config={
+#         "host": "127.0.0.1",
+#         "user": "whmcs_readonly",
+#         "password": "REDACTED",
+#         "database": "whmcs",
+#         "port": 3306,
+#     },
+#     company="Chromeis Pvt Ltd",
+# )
+# status = report.execute()
+#
+# if status in ("FAIL", "CRITICAL"):
+#     sys.exit(1)  # e.g. fail a CI job or migration gate on this signal

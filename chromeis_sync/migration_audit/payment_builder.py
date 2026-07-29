@@ -35,6 +35,17 @@ class PaymentBuilder:
 
         pe = frappe.new_doc("Payment Entry")
 
+        print("\n===== PAYMENT SNAPSHOT =====")
+        print("Payment ID:", self.payment["id"])
+        print("WHMCS Invoice ID:", self.payment.get("invoiceid"))
+        print("Invoice Object:", self.invoice)
+
+        if self.invoice:
+            print("ERP Invoice:", self.invoice["name"])
+            print("Outstanding:", self.invoice.get("outstanding_amount"))
+            print("Customer:", self.invoice["customer"])
+
+
         pe.payment_type = "Receive"
         pe.company = "Chromeis Pvt Ltd"
         pe.party_type = "Customer"

@@ -54,8 +54,11 @@ class RepairEngine:
 
         result = InvoiceTransaction(
             candidate["invoice_name"],
-            candidate["currency"]
+            candidate["target_currency"]
         ).execute()
+
+        # Remove successfully processed invoice from manifest
+        self.manifest.remove(candidate)
 
         return result
 

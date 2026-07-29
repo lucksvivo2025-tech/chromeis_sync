@@ -25,6 +25,7 @@ class RepairManifest:
                 "status": candidate.status,
                 "reason": ", ".join(candidate.reasons),
                 "currency": candidate.currency,
+                "target_currency": candidate.target_currency,
                 "conversion_rate": candidate.conversion_rate,
                 "repair_required": candidate.repair_required,
             })

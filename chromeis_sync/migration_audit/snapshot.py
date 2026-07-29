@@ -44,8 +44,13 @@ class SnapshotService:
                 SELECT *
                 FROM `tabGL Entry`
                 WHERE voucher_no=%s
-                ORDER BY creation
-            """, si.name, as_dict=True),
+                  AND creation = (
+                      SELECT MIN(creation)
+                      FROM `tabGL Entry`
+                      WHERE voucher_no=%s
+                  )
+                ORDER BY account
+            """, (si.name, si.name), as_dict=True),
 
             "whmcs_items": frappe.db.sql("""
                 SELECT *
