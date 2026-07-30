@@ -22,7 +22,6 @@ class ValidationEngine:
     def __init__(self):
 
         self.integrity_validator = InvoiceIntegrityValidator()
-
         self.payment_validator = PaymentAllocationValidator()
 
     def validate(
@@ -50,30 +49,13 @@ class ValidationEngine:
                 )
             )
 
-        # Will be integrated after PaymentAllocationValidator
-        # exposes a validate(...) interface instead of run().
-        #
         # -----------------------------------------------------
         # Payment Allocation
         # -----------------------------------------------------
 
-        payment_results = self.payment_validator.validate(invoice)
+        payment_issues = self.payment_validator.validate(invoice)
 
-        for payment in payment_results:
-
-            if payment["status"] != "PASS":
-
-                result.add(
-                    ValidationIssue(
-                        component="Payment Allocation",
-                        field=f"Payment {payment['whmcs_txn_id']}",
-                        expected="Allocated",
-                        actual="Unallocated",
-                        message=payment["reason"],
-                    )
-                )
-
-
-
+        for issue in payment_issues:
+            result.add(issue)
 
         return result

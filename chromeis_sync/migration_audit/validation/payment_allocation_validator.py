@@ -1,3 +1,7 @@
+from chromeis_sync.migration_audit.domain.models.validation import (
+    ValidationIssue,
+    ValidationSeverity,
+)
 from chromeis_sync.migration_audit.domain.models.whmcs import (
     WHMCSInvoice,
     WHMCSPayment,
@@ -20,43 +24,60 @@ class PaymentAllocationValidator:
     def validate_payment(
         self,
         payment: WHMCSPayment,
-    ):
+    ) -> list[ValidationIssue]:
 
-        result = {
-            "whmcs_txn_id": payment.id,
-            "invoice_id": payment.invoice_id,
-            "amount": payment.amount,
-            "status": "PASS",
-            "reason": None,
-        }
+        issues: list[ValidationIssue] = []
 
         erp_payment = self.erp_provider.load_payment(payment.id)
 
         if not erp_payment:
-            result["status"] = "FAIL"
-            result["reason"] = "Missing ERP Payment"
-            return result
+
+            issues.append(
+                ValidationIssue(
+                    component="Payment Allocation",
+                    field=f"Payment {payment.id}",
+                    expected="ERP Payment Exists",
+                    actual="Missing ERP Payment",
+                    severity=ValidationSeverity.ERROR,
+                    message="Missing ERP Payment",
+                )
+            )
+
+            return issues
 
         references = self.erp_provider.load_references(
             erp_payment["name"]
         )
 
         if payment.invoice_id and not references:
-            result["status"] = "FAIL"
-            result["reason"] = "Missing Allocation"
 
-        return result
+            issues.append(
+                ValidationIssue(
+                    component="Payment Allocation",
+                    field=f"Payment {payment.id}",
+                    expected="Allocated",
+                    actual="Unallocated",
+                    severity=ValidationSeverity.ERROR,
+                    message="Missing Allocation",
+                )
+            )
+
+        return issues
 
     def validate(
         self,
         invoice: WHMCSInvoice,
-    ):
+    ) -> list[ValidationIssue]:
 
         payments = self.whmcs_provider.load_payments(
             invoice.header.invoice_id
         )
 
-        return [
-            self.validate_payment(payment)
-            for payment in payments
-        ]
+        issues: list[ValidationIssue] = []
+
+        for payment in payments:
+            issues.extend(
+                self.validate_payment(payment)
+            )
+
+        return issues
