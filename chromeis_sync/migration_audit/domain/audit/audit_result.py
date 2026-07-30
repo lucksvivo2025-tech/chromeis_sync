@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from chromeis_sync.migration_audit.domain.matchers.identity_match_result import (
+from chromeis_sync.migration_audit.domain.match_results.identity_match_result import (
     IdentityMatchResult,
 )
 
