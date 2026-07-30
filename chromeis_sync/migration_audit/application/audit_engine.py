@@ -13,7 +13,9 @@ from chromeis_sync.migration_audit.infrastructure.providers.snapshot_provider im
 from chromeis_sync.migration_audit.infrastructure.providers.whmcs_provider import (
     WHMCSProvider,
 )
-
+from chromeis_sync.migration_audit.application.validation_engine import (
+    ValidationEngine,
+)
 
 class AuditEngine:
     """
@@ -31,6 +33,7 @@ class AuditEngine:
         self.whmcs_provider = WHMCSProvider()
         self.snapshot_provider = SnapshotProvider()
 
+        self.validation_engine = ValidationEngine()
         self.extractor = IdentityExtractor()
         self.matcher = IdentityMatcher()
 
@@ -42,6 +45,10 @@ class AuditEngine:
 
         whmcs_invoice = self.whmcs_provider.load_invoice(
             whmcs_invoice_id
+        )
+
+        validation_result = self.validation_engine.validate(
+            whmcs_invoice
         )
 
         snapshot = self.snapshot_provider.load(
