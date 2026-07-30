@@ -20,6 +20,13 @@ class PaymentReconciliationValidator:
             result.failed += 1
             result.missing_payment_entry += 1
             return result
+        #
+        # Cancelled Payment Entry
+        #
+        if candidate.payment_docstatus == 2:
+            result.failed += 1
+            result.cancelled_payment += 1
+            return result
 
         #
         # Expected Sales Invoice
@@ -27,6 +34,14 @@ class PaymentReconciliationValidator:
         if not candidate.expected_sales_invoice:
             result.failed += 1
             result.missing_sales_invoice += 1
+            return result
+
+        #
+        # Cancelled Sales Invoice
+        #
+        if candidate.invoice_docstatus == 2:
+            result.failed += 1
+            result.cancelled_invoice += 1
             return result
 
         #

@@ -32,7 +32,9 @@ class PaymentReconciliationReport:
             summary.missing_allocation += result.missing_allocation
 
             summary.refunds += result.refunds
-            summary.cancelled += result.cancelled
+
+            summary.cancelled_payment += result.cancelled_payment
+            summary.cancelled_invoice += result.cancelled_invoice
 
             summary.warnings += result.warnings
 
@@ -56,7 +58,8 @@ class PaymentReconciliationReport:
         print()
 
         print(f"Refunds                 : {summary.refunds}")
-        print(f"Cancelled               : {summary.cancelled}")
+        print(f"Cancelled Payments      : {summary.cancelled_payment}")
+        print(f"Cancelled Invoices      : {summary.cancelled_invoice}")
         print(f"Warnings                : {summary.warnings}")
 
         print("=" * 80)

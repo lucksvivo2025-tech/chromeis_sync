@@ -53,14 +53,23 @@ class CreditAppliedHandler:
             },
         )
 
-        journal.append(
-            "accounts",
-            {
-                "account": invoice.debit_to,
-                "party_type": "Customer",
-                "party": invoice.customer,
-                "credit_in_account_currency": amount,
-            },
-        )
+        row = {
+            "account": invoice.debit_to,
+            "party_type": "Customer",
+            "party": invoice.customer,
+            "credit_in_account_currency": amount,
+        }
+
+        erp_invoice = frappe.get_doc("Sales Invoice", invoice.name)
+
+        if (
+            erp_invoice.docstatus == 1
+            and erp_invoice.status != "Cancelled"
+            and erp_invoice.outstanding_amount >= amount
+        ):
+            row["reference_type"] = "Sales Invoice"
+            row["reference_name"] = invoice.name
+
+        journal.append("accounts", row)
 
         return journal

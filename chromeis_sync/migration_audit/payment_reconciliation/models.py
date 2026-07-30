@@ -17,6 +17,18 @@ class PaymentReconciliationCandidate:
     expected_sales_invoice: str | None
     allocated_sales_invoice: str | None
     customer: str | None
+    payment_docstatus: int | None = None
+    payment_status: str | None = None
+
+    invoice_docstatus: int | None = None
+    invoice_status: str | None = None
+
+    expected_customer: str | None = None
+    allocated_customer: str | None = None
+
+    invoice_currency: str | None = None
+    allocated_currency: str | None = None
+
 
     paid_amount: float = 0.0
     unallocated_amount: float = 0.0
@@ -46,6 +58,8 @@ class PaymentReconciliationResult:
     missing_allocation: int = 0
 
     refunds: int = 0
-    cancelled: int = 0
+
+    cancelled_payment: int = 0
+    cancelled_invoice: int = 0
 
     warnings: int = 0
