@@ -83,3 +83,30 @@ class WHMCSInvoice:
     taxes: List[WHMCSTax] = field(default_factory=list)
 
     created_at: Optional[datetime] = None
+
+# ============================================================
+# WHMCS Payment
+# ============================================================
+
+@dataclass(slots=True)
+class WHMCSPayment:
+    id: int
+
+    invoice_id: int
+    user_id: int
+
+    amount: Decimal
+
+    payment_date: datetime
+
+    transaction_id: Optional[str] = None
+
+    gateway: Optional[str] = None
+
+    fees: Decimal = Decimal("0.00")
+
+    currency: Optional[str] = None
+
+    exchange_rate: Optional[Decimal] = None
+
+    notes: Optional[str] = None

@@ -7,6 +7,9 @@ from chromeis_sync.migration_audit.domain.models.validation import (
 from chromeis_sync.migration_audit.validation.invoice_integrity_validator import (
     InvoiceIntegrityValidator,
 )
+from chromeis_sync.migration_audit.validation.payment_allocation_validator import (
+    PaymentAllocationValidator,
+)
 
 
 class ValidationEngine:
@@ -20,12 +23,18 @@ class ValidationEngine:
 
         self.integrity_validator = InvoiceIntegrityValidator()
 
+        self.payment_validator = PaymentAllocationValidator()
+
     def validate(
         self,
         invoice,
     ) -> ValidationResult:
 
         result = ValidationResult()
+
+        # -----------------------------------------------------
+        # Invoice Integrity
+        # -----------------------------------------------------
 
         integrity = self.integrity_validator.validate(invoice)
 
@@ -40,5 +49,31 @@ class ValidationEngine:
                     message=integrity.status,
                 )
             )
+
+        # Will be integrated after PaymentAllocationValidator
+        # exposes a validate(...) interface instead of run().
+        #
+        # -----------------------------------------------------
+        # Payment Allocation
+        # -----------------------------------------------------
+
+        payment_results = self.payment_validator.validate(invoice)
+
+        for payment in payment_results:
+
+            if payment["status"] != "PASS":
+
+                result.add(
+                    ValidationIssue(
+                        component="Payment Allocation",
+                        field=f"Payment {payment['whmcs_txn_id']}",
+                        expected="Allocated",
+                        actual="Unallocated",
+                        message=payment["reason"],
+                    )
+                )
+
+
+
 
         return result
