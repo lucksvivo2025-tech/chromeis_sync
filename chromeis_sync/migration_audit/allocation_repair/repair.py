@@ -1,0 +1,152 @@
+import frappe
+
+from chromeis_sync.migration_audit.allocation_repair.executor import (
+    PaymentRepairExecutor,
+)
+from chromeis_sync.migration_audit.allocation_repair.planner import (
+    PaymentRepairPlanner,
+)
+from chromeis_sync.migration_audit.allocation_repair.validator import (
+    PaymentRepairValidator,
+)
+
+class PaymentRepair:
+
+    def preview_one(self, payment_entry_name):
+
+        planner = PaymentRepairPlanner()
+        validator = PaymentRepairValidator()
+        executor = PaymentRepairExecutor()
+
+        rows = planner.get_candidates()
+
+        candidate = None
+
+        for row in rows:
+            if row.payment_entry == payment_entry_name:
+                candidate = row
+                break
+
+        if not candidate:
+            raise Exception("Payment Entry not found in planner.")
+
+        errors = validator.validate(candidate)
+
+        if errors:
+
+            print()
+            print("=" * 80)
+            print("VALIDATION FAILED")
+            print("=" * 80)
+
+            for e in errors:
+                print(e)
+
+            return
+
+        executor.preview(candidate)
+
+    def dry_run(self):
+
+        planner = PaymentRepairPlanner()
+        validator = PaymentRepairValidator()
+
+        rows = planner.get_candidates()
+
+        print()
+        print("=" * 80)
+        print("PAYMENT REPAIR DRY RUN")
+        print("=" * 80)
+
+        passed = 0
+        failed = 0
+
+        for row in rows:
+
+            errors = validator.validate(row)
+
+            if errors:
+                failed += 1
+
+                print()
+                print("-" * 80)
+                print(row.payment_entry)
+                print(row.sales_invoice)
+
+                for e in errors:
+                    print("ERROR:", e)
+
+            else:
+                passed += 1
+
+        print()
+        print("=" * 80)
+        print("SUMMARY")
+        print("=" * 80)
+        print(f"Passed : {passed}")
+        print(f"Failed : {failed}")
+
+    def execute(self, limit=None, commit=True):
+
+        planner = PaymentRepairPlanner()
+        validator = PaymentRepairValidator()
+        executor = PaymentRepairExecutor()
+
+        rows = planner.get_candidates()
+
+        success = 0
+        failed = 0
+        skipped = 0
+
+        processed = 0
+
+        print()
+        print("=" * 80)
+        print("PAYMENT REPAIR EXECUTION")
+        print("=" * 80)
+
+        for row in rows:
+
+            errors = validator.validate(row)
+
+            if errors:
+                failed += 1
+
+                print(f"[FAILED] {row.payment_entry}")
+
+                for e in errors:
+                    print(f"    - {e}")
+
+                continue
+
+            try:
+                executor.execute(row, commit=commit)
+
+                success += 1
+                processed += 1
+
+                print(
+                    f"[{processed}] SUCCESS "
+                    f"{row.payment_entry} -> {row.sales_invoice}"
+                )
+
+                if limit and processed >= limit:
+                    break
+
+            except Exception as ex:
+
+                failed += 1
+
+                print(f"[ERROR] {row.payment_entry}")
+                print(str(ex))
+
+                frappe.db.rollback()
+
+        print()
+        print("=" * 80)
+        print("SUMMARY")
+        print("=" * 80)
+        print(f"Success : {success}")
+        print(f"Failed  : {failed}")
+        print(f"Skipped : {skipped}")
+

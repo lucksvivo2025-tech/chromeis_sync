@@ -9,7 +9,6 @@ from erpnext.accounts.utils import (
     update_voucher_outstanding,
 )
 
-
 from .builder import PaymentReferenceBuilder
 
 
@@ -50,18 +49,35 @@ class PaymentRepairExecutor:
         return reference
 
     def execute(self, candidate, commit=False):
+
         pe = frappe.get_doc("Payment Entry", candidate.payment_entry)
 
         if len(pe.references):
-            raise Exception(f"{pe.name} already contains references.")
+            raise Exception(
+                f"{pe.name} already contains references."
+            )
+
+        si = frappe.get_doc(
+            "Sales Invoice",
+            candidate.sales_invoice,
+        )
+
+        reference = PaymentReferenceBuilder().build(pe, si)
 
         row = pe.append("references", {})
 
-        row.reference_doctype = "Sales Invoice"
-        row.reference_name = candidate.sales_invoice
-        row.total_amount = flt(candidate.paid_amount)
-        row.outstanding_amount = flt(candidate.paid_amount)
-        row.allocated_amount = flt(candidate.paid_amount)
+        row.reference_doctype = reference["reference_doctype"]
+        row.reference_name = reference["reference_name"]
+        row.bill_no = reference["bill_no"]
+        row.due_date = reference["due_date"]
+
+        row.total_amount = flt(reference["total_amount"])
+
+        # Payment Entry Reference should represent the
+        # invoice before allocation.
+        row.outstanding_amount = flt(reference["total_amount"])
+
+        row.allocated_amount = flt(reference["allocated_amount"])
 
         pe.flags.ignore_validate_update_after_submit = True
 
@@ -73,10 +89,9 @@ class PaymentRepairExecutor:
 
         pe.save(ignore_permissions=True)
 
-        # ------------------------------------------------------------------
-        # Rebuild Payment Ledger Entries (same flow used by ERPNext
-        # reconciliation)
-        # ------------------------------------------------------------------
+        # ---------------------------------------------------------
+        # Rebuild Payment Ledger Entries
+        # ---------------------------------------------------------
 
         _delete_pl_entries(pe.doctype, pe.name)
         _delete_adv_pl_entries(pe.doctype, pe.name)
@@ -92,14 +107,12 @@ class PaymentRepairExecutor:
             adv_adj=1,
         )
 
-        si = frappe.get_doc("Sales Invoice", candidate.sales_invoice)
-
         update_voucher_outstanding(
-           "Sales Invoice",
-           candidate.sales_invoice,
-           si.debit_to,
-           pe.party_type,
-           pe.party,
+            "Sales Invoice",
+            candidate.sales_invoice,
+            si.debit_to,
+            pe.party_type,
+            pe.party,
         )
 
         if commit:
