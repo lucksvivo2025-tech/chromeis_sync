@@ -31,7 +31,7 @@ class OverpaymentHandler:
             customer = frappe.db.get_value(
                 "Customer",
                 {
-                    "custom_whmcs_client_id": str(self.snapshot["clientid"])
+                    "custom_whmcs_user_id": str(self.snapshot["clientid"])
                 },
                 "name",
             )

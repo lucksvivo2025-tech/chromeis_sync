@@ -1,0 +1,99 @@
+from chromeis_sync.sync_engine.framework.identity.base_entity import (
+    BaseEntity,
+)
+
+from chromeis_sync.sync_engine.framework.repositories.service import (
+    ServiceRepository,
+)
+
+from chromeis_sync.sync_engine.framework.repositories.customer import (
+    CustomerRepository,
+)
+
+from chromeis_sync.sync_engine.framework.repositories.invoice import (
+    InvoiceRepository,
+)
+
+
+ENTITY_REGISTRY = {
+
+    "service": BaseEntity(
+
+        name="Service",
+
+        whmcs_table="tblhosting",
+
+        erp_doctype="Hosting Service",
+
+        identity_field="custom_whmcs_service_id",
+
+        repository=ServiceRepository,
+
+        match_fields=[
+            "domain",
+            "packageid",
+        ],
+
+        description="WHMCS Hosting Services",
+
+    ),
+
+    "customer": BaseEntity(
+
+        name="Customer",
+
+        whmcs_table="tblclients",
+
+        erp_doctype="Customer",
+
+        identity_field="custom_whmcs_client_id",
+
+        repository=CustomerRepository,
+
+        match_fields=[
+            "email",
+        ],
+
+        description="WHMCS Customers",
+
+    ),
+
+    "invoice": BaseEntity(
+
+        name="Invoice",
+
+        whmcs_table="tblinvoices",
+
+        erp_doctype="Sales Invoice",
+
+        identity_field="whmcs_invoice_id",
+
+        repository=InvoiceRepository,
+
+        match_fields=[],
+
+        description="WHMCS Invoices",
+
+    ),
+
+}
+
+
+def get_entity(name):
+
+    key = str(name).lower()
+
+    if key not in ENTITY_REGISTRY:
+
+        raise KeyError(
+            f"Unknown entity: {name}"
+        )
+
+    return ENTITY_REGISTRY[key]
+
+
+def list_entities():
+
+    return sorted(
+        ENTITY_REGISTRY.keys()
+    )

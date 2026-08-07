@@ -21,9 +21,17 @@ class ServiceSnapshot:
 
         service = service[0]
 
+
+        # -------------------------
+        # CLIENT LOOKUP
+        # -------------------------
+
+        client_deleted = False
+
         client = frappe.db.sql(
             """
             SELECT
+                id,
                 firstname,
                 lastname,
                 companyname,
@@ -31,22 +39,101 @@ class ServiceSnapshot:
             FROM whmcs_mirror.tblclients
             WHERE id=%s
             """,
-            (service["userid"],),
+            (service.userid,),
             as_dict=True,
         )
 
-        service["client"] = client[0] if client else {}
+
+        if client:
+
+            client = client[0]
+
+        else:
+
+            client_deleted = True
+
+            client = {
+                "id": service.userid,
+                "firstname": "Deleted",
+                "lastname": f"WHMCS Client {service.userid}",
+                "companyname": "",
+                "email": "",
+            }
+
+
+
+        # -------------------------
+        # PRODUCT LOOKUP
+        # -------------------------
+
+        product_deleted = False
 
         product = frappe.db.sql(
             """
-            SELECT *
+            SELECT
+                id,
+                name
             FROM whmcs_mirror.tblproducts
             WHERE id=%s
             """,
-            (service["packageid"],),
+            (service.packageid,),
             as_dict=True,
         )
 
-        service["product"] = product[0] if product else {}
 
-        return service
+        if product:
+
+            product = product[0]
+
+        else:
+
+            product_deleted = True
+
+            product = {
+                "id": service.packageid,
+                "name": f"Deleted WHMCS Product {service.packageid}",
+            }
+
+
+
+        # -------------------------
+        # FINAL SNAPSHOT
+        # -------------------------
+
+        return {
+
+            "id": service.id,
+
+            "userid": service.userid,
+
+            "packageid": service.packageid,
+
+            "domain": service.domain,
+
+            "paymentmethod": service.paymentmethod,
+
+            "qty": service.qty,
+
+            "amount": service.amount,
+
+            "billingcycle": service.billingcycle,
+
+            "nextduedate": service.nextduedate,
+
+            "domainstatus": service.domainstatus,
+
+            "username": service.username,
+
+            "dedicatedip": service.dedicatedip,
+
+
+            "client": client,
+
+            "product": product,
+
+
+            # flags
+            "client_deleted": client_deleted,
+
+            "product_deleted": product_deleted,
+        }

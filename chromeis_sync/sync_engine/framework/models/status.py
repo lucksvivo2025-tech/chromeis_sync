@@ -1,0 +1,20 @@
+from enum import Enum
+
+
+class SyncStatus(str, Enum):
+    MATCHED = "MATCHED"
+    CREATED = "CREATED"
+    UPDATED = "UPDATED"
+
+    MISSING = "MISSING"
+    EXCLUDED = "EXCLUDED"
+    SKIPPED = "SKIPPED"
+
+    DUPLICATE = "DUPLICATE"
+    CONFLICT = "CONFLICT"
+
+    INVALID = "INVALID"
+    FAILED = "FAILED"
+
+    ORPHAN = "ORPHAN"
+    PARENT_MISSING = "PARENT_MISSING"
