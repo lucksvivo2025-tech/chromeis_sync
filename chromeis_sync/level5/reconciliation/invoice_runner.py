@@ -29,28 +29,18 @@ class InvoiceVerificationRunner:
             whmcs_invoice_id = str(whmcs_invoice_id)
 
             try:
-                # -------------------------------------------------
-                # 1. Discover every ERP candidate
-                # -------------------------------------------------
-
                 candidates = (
                     ERPCandidateCollector.sales_invoice(
                         whmcs_invoice_id
                     )
                 )
 
-                classification = CandidateClassifier.classify(
+                identity_result = CandidateClassifier.classify(
                     candidates,
                     authoritative_id=whmcs_invoice_id,
                 )
 
-                # -------------------------------------------------
-                # 2. Missing / duplicate / unresolved cases
-                #    cannot safely undergo normal invoice
-                #    verification.
-                # -------------------------------------------------
-
-                if classification["classification"] in (
+                if identity_result["classification"] in (
                     CandidateClassifier.MISSING,
                     CandidateClassifier.DUPLICATE,
                     CandidateClassifier.ORPHAN,
@@ -59,25 +49,28 @@ class InvoiceVerificationRunner:
 
                     result = {
                         "whmcs_id": whmcs_invoice_id,
-                        "erp_id": classification.get("selected"),
+                        "erp_id": identity_result.get("selected"),
                         "status": "NOT_VERIFIED",
                         "differences": [
                             {
                                 "field": "classification",
-                                "classification": classification[
+                                "classification": identity_result[
                                     "classification"
                                 ],
-                                "reason": classification["reason"],
-                                "candidates": classification[
+                                "reason": identity_result["reason"],
+                                "candidates": identity_result[
                                     "candidates"
                                 ],
                             }
+                        ],
+                        "identity_classification": identity_result[
+                            "classification"
                         ],
                     }
 
                     registry = InvoiceRegistryWriter.write(
                         result,
-                        classification=classification[
+                        identity_classification=identity_result[
                             "classification"
                         ],
                     )
@@ -87,57 +80,45 @@ class InvoiceVerificationRunner:
 
                     continue
 
-                # -------------------------------------------------
-                # 3. Safe candidate selected
-                # -------------------------------------------------
-
-                erp_id = classification["selected"]
+                erp_id = identity_result["selected"]
 
                 evidence = InvoiceCollector.collect(
                     whmcs_invoice_id,
                     erp_id,
                 )
 
-                # -------------------------------------------------
-                # 4. Full verification
-                # -------------------------------------------------
-
                 result = InvoiceVerifier.verify(
                     evidence
                 )
-
-                # -------------------------------------------------
-                # 5. Apply reconciliation classification
-                # -------------------------------------------------
 
                 from chromeis_sync.level5.classification.invoice_result_classifier import (
                     InvoiceResultClassifier,
                 )
 
-                result_classification = (
+                reconciliation_result = (
                     InvoiceResultClassifier.classify(
                         result,
                         evidence,
                     )
                 )
 
-                result["classification"] = result_classification
+                result["reconciliation_classification"] = (
+                    reconciliation_result
+                )
 
-                result["candidate_classification"] = (
-                    classification["classification"]
+                result["identity_classification"] = (
+                    identity_result["classification"]
                 )
 
                 result["classification_reason"] = (
-                    classification["reason"]
+                    identity_result["reason"]
                 )
-
-                # -------------------------------------------------
-                # 6. Persist Level 5 certification
-                # -------------------------------------------------
 
                 registry = InvoiceRegistryWriter.write(
                     result,
-                    classification=result_classification,
+                    identity_classification=identity_result[
+                        "classification"
+                    ],
                 )
 
                 result["registry"] = registry

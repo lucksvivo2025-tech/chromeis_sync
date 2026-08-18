@@ -4,7 +4,7 @@ import frappe
 class InvoiceRegistryWriter:
 
     @staticmethod
-    def write(result, classification=None):
+    def write(result, identity_classification=None):
 
         erp_id = result.get("erp_id")
         whmcs_id = result.get("whmcs_id")
@@ -41,32 +41,29 @@ class InvoiceRegistryWriter:
             f"INV-{whmcs_id}-ERP-{erp_id}"
         )
 
-        # ---------------------------------------------------------
         # Identity classification
-        # ---------------------------------------------------------
 
         doc.classification = (
-            result.get("candidate_classification")
-            or classification
+            result.get("identity_classification")
+            or identity_classification
             or ""
         )
 
-        # ---------------------------------------------------------
-        # Verification result
-        # ---------------------------------------------------------
-
         verification_result = result.get("status")
 
-        if classification == "CANCELLED_REVERSED":
+        if identity_classification == "CANCELLED_REVERSED":
             doc.verification_status = "Pending"
 
-        elif classification == "MISSING":
+        elif identity_classification == "MISSING":
             doc.verification_status = "Missing in ERP"
 
-        elif classification == "ORPHAN":
+        elif identity_classification == "ORPHAN":
             doc.verification_status = "Missing in WHMCS"
 
-        elif classification in ("DUPLICATE", "UNRESOLVED"):
+        elif identity_classification in (
+            "DUPLICATE",
+            "UNRESOLVED",
+        ):
             doc.verification_status = "Pending"
 
         elif verification_result == "VERIFIED":
@@ -80,12 +77,11 @@ class InvoiceRegistryWriter:
 
         doc.verification_result = verification_result
 
-        # ---------------------------------------------------------
         # Reconciliation classification
-        # ---------------------------------------------------------
 
         doc.reconciliation_classification = (
-            result.get("classification") or ""
+            result.get("reconciliation_classification")
+            or ""
         )
 
         differences = result.get("differences") or []
@@ -113,7 +109,9 @@ class InvoiceRegistryWriter:
 
             doc.invoice_allocation_status = (
                 "NOT_ALLOCATED"
-                if not difference.get("invoice_allocation_found")
+                if not difference.get(
+                    "invoice_allocation_found"
+                )
                 else "ALLOCATED"
             )
 
