@@ -12,6 +12,10 @@ class InvoiceResultClassifier:
 
         differences = result.get("differences") or []
 
+        # No differences = fully verified invoice
+        if not differences:
+            return "PROPER"
+
         fields = {
             d.get("field")
             for d in differences
@@ -56,5 +60,10 @@ class InvoiceResultClassifier:
             return "WHMCS_CREDIT_PRESENTATION_ONLY"
 
 
-        # 4. Commercial
+        # 4. Item difference
+        if "items" in fields:
+            return "ITEM_DIFFERENCE"
+
+
+        # 5. Commercial
         return "COMMERCIAL_DIFFERENCE"

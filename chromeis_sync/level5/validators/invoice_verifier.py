@@ -1,4 +1,7 @@
 from decimal import Decimal
+from chromeis_sync.level5.validators.item_verifier import (
+    ItemVerifier,
+)
 
 import frappe
 
@@ -107,6 +110,19 @@ class InvoiceVerifier:
             api.get("tax"),
             mirror.get("tax") if mirror else None,
             None,
+        )
+
+        # ---------------------------------------------------------
+        # Invoice item verification
+        # ---------------------------------------------------------
+
+        item_differences = ItemVerifier.verify(
+            api.get("items"),
+            erp.get("items"),
+        )
+
+        differences.extend(
+            item_differences
         )
 
         # ---------------------------------------------------------
