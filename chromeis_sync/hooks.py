@@ -256,3 +256,17 @@ doc_events = {
 doctype_js = {
     "Customer": "public/js/customer_dashboard.js"
 }
+
+
+fixtures = [
+    {
+        "dt": "Custom Field",
+        "filters": [
+            [
+                "dt",
+                "=",
+                "WHMCS Level 5 Identity Registry"
+            ]
+        ]
+    }
+]
