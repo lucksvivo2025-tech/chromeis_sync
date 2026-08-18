@@ -106,6 +106,18 @@ class InvoiceVerificationRunner:
                     reconciliation_result
                 )
 
+                if reconciliation_result in (
+                    "TAX_PRESENTATION_ONLY",
+                    "WHMCS_CREDIT_PRESENTATION_ONLY",
+                    "CURRENCY_PRESENTATION_ONLY",
+                ):
+                    result["status"] = "VERIFIED"
+
+
+                result["reconciliation_classification"] = (
+                    reconciliation_result
+                )
+
                 result["identity_classification"] = (
                     identity_result["classification"]
                 )
