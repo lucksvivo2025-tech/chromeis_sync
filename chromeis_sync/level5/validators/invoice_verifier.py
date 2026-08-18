@@ -211,16 +211,170 @@ class InvoiceVerifier:
                     })
 
 
+        # ---------------------------------------------------------
+        # Payment relationship verification
+        # ---------------------------------------------------------
+
+
+        payment_differences = (
+            cls._verify_payment_relationship(
+                evidence
+            )
+        )
+
+        differences.extend(
+            payment_differences
+        )
+
+
+        # ---------------------------------------------------------
+        # Credit relationship verification
+        # ---------------------------------------------------------
+
+        credit_differences = (
+            cls._verify_credit_relationship(
+                evidence
+            )
+        )
+
+        differences.extend(
+            credit_differences
+        )
+
+
+        relationship_evidence = {
+            "payment": (
+                "EXCEPTION"
+                if payment_differences
+                else "MATCHED"
+            ),
+            "credit": (
+                "EXCEPTION"
+                if credit_differences
+                else "MATCHED"
+            ),
+        }
+
+        # ---------------------------------------------------------
+        # Final blocking classification
+        #
+        # Presentation-only differences are accepted.
+        # Payment and credit relationship differences are blocking.
+        # ---------------------------------------------------------
+
+        blocking_differences = [
+            d
+            for d in differences
+            if d.get("classification")
+            not in (
+                "TAX_PRESENTATION_ONLY",
+                "WHMCS_CREDIT_PRESENTATION_ONLY",
+            )
+        ]
+
         return {
             "whmcs_id": evidence["whmcs_id"],
             "erp_id": evidence["erp_id"],
             "status": (
                 "VERIFIED"
-                if not differences
+                if not blocking_differences
                 else "ERP_DIFFERENCE"
             ),
             "differences": differences,
+            "relationship_evidence": relationship_evidence,
         }
+
+
+    # -------------------------------------------------------------
+    # Payment relationship verification
+    # -------------------------------------------------------------
+
+    @staticmethod
+    def _verify_payment_relationship(evidence):
+
+        differences = []
+
+        whmcs_transactions = (
+            evidence.get("whmcs_transactions")
+            or []
+        )
+
+        erp_payments = (
+            evidence.get("erp_payments")
+            or []
+        )
+
+        whmcs_amount = sum(
+            float(row.get("amountin") or 0)
+            for row in whmcs_transactions
+        )
+
+        erp_amount = sum(
+            float(row.get("paid_amount") or 0)
+            for row in erp_payments
+        )
+
+        if round(whmcs_amount, 2) != round(erp_amount, 2):
+
+            differences.append({
+                "field": "payment_relationship",
+                "source": "WHMCS_transactions_vs_ERP_payment_entries",
+                "whmcs_amount": whmcs_amount,
+                "erp_amount": erp_amount,
+            })
+
+        return differences
+
+
+    # -------------------------------------------------------------
+    # Credit relationship verification
+    # -------------------------------------------------------------
+
+    @staticmethod
+    def _verify_credit_relationship(evidence):
+
+        differences = []
+
+        whmcs_credits = (
+            evidence.get("whmcs_credits")
+            or []
+        )
+
+        if not whmcs_credits:
+            return differences
+
+        erp_journals = (
+            evidence.get("erp_journals")
+            or []
+        )
+
+        erp_credit_ids = {
+            str(row.get("custom_whmcs_credit_id"))
+            for row in erp_journals
+            if row.get("custom_whmcs_credit_id")
+        }
+
+        for credit in whmcs_credits:
+
+            credit_id = str(
+                credit.get("id")
+            )
+
+            if credit_id not in erp_credit_ids:
+
+                differences.append({
+                    "field": "credit_relationship",
+                    "source": "WHMCS_credit_vs_ERP_journal",
+                    "whmcs_credit_id": credit_id,
+                    "whmcs_amount": abs(
+                        float(
+                            credit.get("amount") or 0
+                        )
+                    ),
+                    "erp_journal_found": False,
+                })
+
+        return differences
 
 
     @staticmethod
