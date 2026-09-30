@@ -92,23 +92,25 @@ class InvoiceResultClassifier:
             wh_credit > 0
             or any(
                 Decimal(
-                    str(abs(row.get("amount") or 0))
-                ) > 0
+                    str(row.get("amount") or 0)
+                ).copy_abs() > 0
                 for row in whmcs_credit_rows
             )
         )
 
-        gross_total_difference_only = fields.issubset(
+        credit_presentation_difference_only = fields.issubset(
             {
                 "gross_total",
                 "balance",
+                "tax",
+                "tax_structure",
             }
         )
 
         if (
             credit_exists
             and wh_subtotal == erp_net
-            and gross_total_difference_only
+            and credit_presentation_difference_only
         ):
             return "WHMCS_CREDIT_PRESENTATION_ONLY"
 
@@ -185,6 +187,7 @@ class InvoiceResultClassifier:
 
         if (
             "balance" in fields
+            and "items" not in fields
             and whmcs_invoice_total == erp_net
             and whmcs_payment_amount == erp_payment_amount
             and whmcs_payment_amount > whmcs_invoice_total
@@ -198,13 +201,38 @@ class InvoiceResultClassifier:
             return "WHMCS_CREDIT_PRESENTATION_ONLY"
 
         # ---------------------------------------------------------
-        # Item difference
+        # Item presentation
         #
-        # An actual item difference is commercial unless another
-        # explicit classification above applies.
+        # WHMCS and ERP may represent the same commercial invoice
+        # with different line-item structures.  Item-level
+        # differences remain preserved as forensic evidence, but
+        # are presentation-only when the authoritative commercial
+        # invoice values already reconcile.
+        #
+        # A separate gross/total/balance/payment difference remains
+        # blocking and will therefore not reach this classification.
         # ---------------------------------------------------------
 
         if "items" in fields:
+            whmcs_total = Decimal(
+                str(api.get("total") or 0)
+            )
+
+            erp_grand_total = Decimal(
+                str(erp.get("grand_total") or 0)
+            )
+
+            if (
+                abs(
+                    whmcs_total
+                    - erp_grand_total
+                )
+                <= Decimal("0.0001")
+                and
+                result.get("status") == "VERIFIED"
+            ):
+                return "PROPER"
+
             return "COMMERCIAL_DIFFERENCE"
 
         # ---------------------------------------------------------

@@ -28,6 +28,10 @@ class InvoiceRegistryWriter:
                 "WHMCS Level 5 Identity Registry"
             )
 
+        # ---------------------------------------------------------
+        # Identity
+        # ---------------------------------------------------------
+
         doc.entity_type = "Invoice"
         doc.whmcs_id = str(whmcs_id or "")
         doc.whmcs_record_id = str(whmcs_id or "")
@@ -41,10 +45,6 @@ class InvoiceRegistryWriter:
             f"INV-{whmcs_id}-ERP-{erp_id}"
         )
 
-        # ---------------------------------------------------------
-        # Identity classification
-        # ---------------------------------------------------------
-
         identity_classification = (
             result.get("identity_classification")
             or identity_classification
@@ -53,12 +53,15 @@ class InvoiceRegistryWriter:
 
         doc.classification = identity_classification
 
-
         # ---------------------------------------------------------
-        # Verification status
+        # Verification result
         # ---------------------------------------------------------
 
-        verification_result = result.get("status")
+        verification_result = (
+            result.get("verification_result")
+            or result.get("status")
+            or "NOT_VERIFIED"
+        )
 
         if identity_classification == "CANCELLED_REVERSED":
 
@@ -91,12 +94,8 @@ class InvoiceRegistryWriter:
 
             doc.verification_status = "Pending"
 
-
         # ---------------------------------------------------------
         # Normalize verification result
-        #
-        # NOT_VERIFIED is a runner state.
-        # It is not a valid certification result.
         # ---------------------------------------------------------
 
         if verification_result == "NOT_VERIFIED":
@@ -127,23 +126,49 @@ class InvoiceRegistryWriter:
 
             doc.verification_result = verification_result
 
-
         # ---------------------------------------------------------
         # Reconciliation classification
         # ---------------------------------------------------------
 
-        doc.reconciliation_classification = (
+        reconciliation_classification = (
             result.get("reconciliation_classification")
             or ""
         )
 
+        doc.reconciliation_classification = (
+            reconciliation_classification
+        )
 
-        differences = result.get("differences") or []
+        # ---------------------------------------------------------
+        # Certification
+        #
+        # CertificationEngine is the authority.
+        # Registry only persists its decision.
+        # ---------------------------------------------------------
 
+        certification_status = (
+            result.get("certification_status")
+            or "NOT_CERTIFIED"
+        )
+
+        certification_reasons = (
+            result.get("certification_reasons")
+            or result.get("reasons")
+            or []
+        )
+
+        doc.certification_status = certification_status
+
+        doc.certification_reason = "\n".join(
+            str(reason)
+            for reason in certification_reasons
+        )
 
         # ---------------------------------------------------------
         # Credit allocation evidence
         # ---------------------------------------------------------
+
+        differences = result.get("differences") or []
 
         for difference in differences:
 
@@ -152,7 +177,6 @@ class InvoiceRegistryWriter:
             ) != "credit_invoice_allocation":
 
                 continue
-
 
             doc.whmcs_credit_id = str(
                 difference.get(
@@ -186,7 +210,6 @@ class InvoiceRegistryWriter:
                 else "ALLOCATED"
             )
 
-
         if not any(
             d.get("field")
             == "credit_invoice_allocation"
@@ -197,24 +220,35 @@ class InvoiceRegistryWriter:
                 "NOT_APPLICABLE"
             )
 
-
         # ---------------------------------------------------------
         # Evidence
         # ---------------------------------------------------------
+
+        evidence_snapshot = (
+            result.get("evidence_snapshot")
+            or {}
+        )
+
+        if evidence_snapshot:
+            doc.evidence_snapshot = frappe.as_json(
+                evidence_snapshot,
+                indent=2,
+            )
 
         doc.last_verified = (
             frappe.utils.now_datetime()
         )
 
         doc.verification_run = (
-            f"INVOICE-{frappe.utils.now_datetime()}"
+            result.get("verification_run")
+            or f"INVOICE-{frappe.utils.now_datetime()}"
         )
 
+        # Preserve exact differences for forensic history.
         doc.notes = "\n".join(
             str(item)
             for item in differences
         )
-
 
         doc.save(
             ignore_permissions=True
